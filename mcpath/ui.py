@@ -123,7 +123,7 @@ def launch(
     num_paths_opts_mode2 = [1000, 2000, 3000, 5000, 10000, 20000, 30000, 40000, 50000]
     (np_mode_2, np_dd_2, np_txt_2, get_num_paths_2) = _list_or_custom(
         label="Number of Paths:", options=num_paths_opts_mode2, default_value=1000,
-        minv=1, max=10_000_000, step=100
+        minv=1, maxv=10_000_000, step=100
     )
 
     # ---------- Mode 3: initial & final residues + number of paths ----------
@@ -133,7 +133,7 @@ def launch(
     num_paths_opts_mode3 = [1000, 2000, 3000, 5000, 10000, 30000, 50000]
     (np_mode_3, np_dd_3, np_txt_3, get_num_paths_3) = _list_or_custom(
         label="Number of Paths:", options=num_paths_opts_mode3, default_value=1000,
-        minv=1, max=10_000_000, step=100
+        minv=1, maxv=10_000_000, step=100
     )
 
     # ---------- Actions & output ----------
