@@ -23,10 +23,21 @@ def launch(defaults_url="https://raw.githubusercontent.com/enesemretas/mcpath-co
     pdb_code   = W.Text(value=str(cfg.get("pdb_code","")), description="PDB code:")
     pdb_upload = W.FileUpload(accept=".pdb", multiple=False, description="Upload PDB")
     chain_id   = W.Text(value=str(cfg.get("chain_id","")), description="Chain ID:")
-    path_len   = W.Dropdown(
-        options=[1_000,10_000,50_000,100_000,200_000,500_000,1_000_000],
-        value=int(cfg.get("path_length",100_000)), description="Path length:"
-    )
+    # Read options from YAML (falls back to a sane list if absent)
+    opts = cfg.get("path_length_options", [
+    100000, 200000, 300000, 400000, 500000, 750000,
+    1000000, 2000000, 3000000, 4000000])
+    # make sure all are ints and unique, sorted
+    opts = sorted({int(x) for x in opts})
+
+    default_len = int(cfg.get("path_length", opts[0] if opts else 100000))
+    # if the default isn't in the list, include it and re-sort so it can be selected
+    if default_len not in opts:
+    opts = sorted(opts + [default_len])
+
+    path_len = W.Dropdown(options=opts, value=default_len, description="Path length:")
+
+
     email      = W.Text(value=str(cfg.get("email","")), description="Email (opt):")
     btn_submit = W.Button(description="Submit", button_style="success", icon="paper-plane")
     btn_clear  = W.Button(description="Clear",  button_style="warning", icon="trash")
