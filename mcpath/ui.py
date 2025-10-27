@@ -20,9 +20,25 @@ def _list_or_custom(label: str, options, default_value, minv, maxv, step=1):
     if default_value not in options:
         options = sorted(options + [default_value])
 
-    mode = W.ToggleButtons(options=[("List","list"), ("Custom","custom")], value="list", description="Input:")
-    dd   = W.Dropdown(options=options, value=default_value, description=label)
-    txt  = W.BoundedIntText(value=default_value, min=minv, max=maxv, step=step, description=label)
+    # wider labels & inputs so text is fully visible
+    common_layout = W.Layout(width="420px", min_width="360px")
+
+    mode = W.ToggleButtons(
+        options=[("List","list"), ("Custom","custom")],
+        value="list",
+        description="Input:",
+        layout=W.Layout(width="240px")
+    )
+    dd   = W.Dropdown(
+        options=options, value=default_value,
+        description=(label if label.endswith(":") else f"{label}:"),
+        layout=common_layout
+    )
+    txt  = W.BoundedIntText(
+        value=default_value, min=minv, max=maxv, step=step,
+        description=(label if label.endswith(":") else f"{label}:"),
+        layout=common_layout
+    )
 
     def _sync(*_):
         if mode.value == "list":
@@ -66,11 +82,20 @@ def launch(
     target_url = cfg.get("target_url", "").strip()
     FN = cfg["field_names"]
 
+    # Where to save files (PDB + mcpath_input.txt)
+    SAVE_DIR = cfg.get("save_dir", "/content")  # you can set in YAML to a Drive path
+    os.makedirs(SAVE_DIR, exist_ok=True)
+
     # ---------- Branding / logo ----------
     logo = _logo_widget(cfg.get("branding", {}))
 
+    # common wide layout so labels are readable
+    wide = W.Layout(width="420px", min_width="360px")
+
     # ---------- PDB: code OR upload (with "or" & filename label) ----------
-    pdb_code   = W.Text(value=str(cfg.get("pdb_code", "")), description="PDB code:")
+    pdb_code   = W.Text(value=str(cfg.get("pdb_code", "")),
+                        description="PDB code:",
+                        layout=wide)
     or_lbl     = W.HTML("<b>&nbsp;&nbsp;or&nbsp;&nbsp;</b>")
     pdb_upload = W.FileUpload(accept=".pdb", multiple=False, description="Choose File")
     file_lbl   = W.Label("No file chosen")
@@ -84,8 +109,12 @@ def launch(
     pdb_upload.observe(_on_upload_change, names="value")
 
     # ---------- Always-present fields ----------
-    chain_id   = W.Text(value=str(cfg.get("chain_id", "")), description="Chain ID:")
-    email      = W.Text(value=str(cfg.get("email", "")), description="Email (opt):")
+    chain_id   = W.Text(value=str(cfg.get("chain_id", "")),
+                        description="Chain ID:",
+                        layout=wide)
+    email      = W.Text(value=str(cfg.get("email", "")),
+                        description="Email (opt):",
+                        layout=wide)
 
     # ---------- Prediction type ----------
     pred_type = W.RadioButtons(
@@ -106,33 +135,39 @@ def launch(
     ])
     big_default = int(cfg.get("path_length", big_opts[0] if big_opts else 100000))
     (pl_mode_big, pl_dd_big, pl_txt_big, get_big_len) = _list_or_custom(
-        label="Path length:", options=big_opts, default_value=big_default,
+        label="Path length", options=big_opts, default_value=big_default,
         minv=1, maxv=10_000_000, step=1000
     )
 
     # ---------- Mode 2: initial residue + short path length + number of paths ----------
-    init_idx   = W.BoundedIntText(value=1, min=1, max=1_000_000, step=1, description="Index of initial residue")
-    init_chain = W.Text(value="", description="Chain of initial residue", placeholder="A", layout=W.Layout(width="260px"))
+    init_idx   = W.BoundedIntText(value=1, min=1, max=1_000_000, step=1,
+                                  description="Index of initial residue:",
+                                  layout=wide)
+    init_chain = W.Text(value="", description="Chain of initial residue:",
+                        placeholder="A", layout=wide)
 
     short_len_opts = [5, 8, 10, 13, 15, 20, 25, 30]
     (pl_mode_short, pl_dd_short, pl_txt_short, get_short_len) = _list_or_custom(
-        label="Length of Paths:", options=short_len_opts, default_value=5,
+        label="Length of Paths", options=short_len_opts, default_value=5,
         minv=1, maxv=10_000, step=1
     )
 
     num_paths_opts_mode2 = [1000, 2000, 3000, 5000, 10000, 20000, 30000, 40000, 50000]
     (np_mode_2, np_dd_2, np_txt_2, get_num_paths_2) = _list_or_custom(
-        label="Number of Paths:", options=num_paths_opts_mode2, default_value=1000,
+        label="Number of Paths", options=num_paths_opts_mode2, default_value=1000,
         minv=1, maxv=10_000_000, step=100
     )
 
     # ---------- Mode 3: initial & final residues + number of paths ----------
-    final_idx   = W.BoundedIntText(value=1, min=1, max=1_000_000, step=1, description="Index of final residue")
-    final_chain = W.Text(value="", description="Chain of final residue", placeholder="B", layout=W.Layout(width="260px"))
+    final_idx   = W.BoundedIntText(value=1, min=1, max=1_000_000, step=1,
+                                   description="Index of final residue:",
+                                   layout=wide)
+    final_chain = W.Text(value="", description="Chain of final residue:",
+                         placeholder="B", layout=wide)
 
     num_paths_opts_mode3 = [1000, 2000, 3000, 5000, 10000, 30000, 50000]
     (np_mode_3, np_dd_3, np_txt_3, get_num_paths_3) = _list_or_custom(
-        label="Number of Paths:", options=num_paths_opts_mode3, default_value=1000,
+        label="Number of Paths", options=num_paths_opts_mode3, default_value=1000,
         minv=1, maxv=10_000_000, step=100
     )
 
@@ -142,7 +177,8 @@ def launch(
     out        = W.Output()
 
     # ---------- Grouped layouts per section ----------
-    pdb_row = W.HBox([pdb_code, W.HTML("&nbsp;"), or_lbl, pdb_upload, file_lbl])
+    pdb_row = W.HBox([pdb_code, W.HTML("&nbsp;"), or_lbl, pdb_upload, file_lbl],
+                     layout=W.Layout(align_items="center", justify_content="flex-start", flex_flow="row wrap", gap="10px"))
 
     functional_box = W.VBox([pl_mode_big, pl_dd_big, pl_txt_big])
     mode2_box = W.VBox([
@@ -185,7 +221,7 @@ def launch(
         W.HBox([btn_submit, btn_clear]),
         W.HTML("<hr>"), out
     ]
-    display(W.VBox(children))
+    display(W.VBox(children, layout=W.Layout(width="auto")))
 
     # -------------------- handlers --------------------
     def on_clear(_):
@@ -224,11 +260,65 @@ def launch(
                 if not _is_valid_email(email.value.strip()):
                     raise ValueError("Invalid email format.")
 
+                # obtain PDB bytes & name
                 pdb_bytes, pdb_name = _collect_pdb_bytes()
 
-                # build payload
+                # ---- Save PDB to SAVE_DIR ----
+                save_path = os.path.join(SAVE_DIR, pdb_name)
+                with open(save_path, "wb") as f:
+                    f.write(pdb_bytes)
+                print(f"Saved local copy: {save_path}")
+
+                # ---- Build input file rows based on mode ----
+                input_path = os.path.join(os.path.dirname(save_path), "mcpath_input.txt")
+                rows = []
+                mode = pred_type.value
+
+                if mode == "functional":
+                    rows = [
+                        "1",
+                        pdb_name,
+                        chain_global,
+                        str(get_big_len()),
+                        email.value.strip() or "-"
+                    ]
+                elif mode == "paths_init_len":
+                    if not _is_valid_chain(init_chain.value or ""):
+                        raise ValueError("Chain of initial residue must be a single character.")
+                    rows = [
+                        "2",
+                        pdb_name,
+                        chain_global,
+                        str(get_short_len()),
+                        str(get_num_paths_2()),
+                        str(int(init_idx.value)),
+                        (init_chain.value or "").strip(),
+                        email.value.strip() or "-"
+                    ]
+                elif mode == "paths_init_final":
+                    if not _is_valid_chain(init_chain.value or ""):
+                        raise ValueError("Chain of initial residue must be a single character.")
+                    if not _is_valid_chain(final_chain.value or ""):
+                        raise ValueError("Chain of final residue must be a single character.")
+                    rows = [
+                        "3",
+                        pdb_name,
+                        chain_global,
+                        str(int(init_idx.value)),
+                        (init_chain.value or "").strip(),
+                        str(int(final_idx.value)),
+                        (final_chain.value or "").strip(),
+                        email.value.strip() or "-"
+                    ]
+
+                with open(input_path, "w") as f:
+                    for r in rows:
+                        f.write(str(r).strip() + "\n")
+                print(f"Input file saved: {input_path}")
+
+                # ---- Prepare payload for optional POST ----
                 data = {
-                    "prediction_mode": pred_type.value,   # for your backend/router
+                    "prediction_mode": mode,
                     FN["chain_id"]: chain_global,
                 }
                 if pdb_code.value.strip():
@@ -236,25 +326,17 @@ def launch(
                 if email.value.strip():
                     data[FN["email"]] = email.value.strip()
 
-                files = {FN["pdb_file"]: (pdb_name, pdb_bytes, "chemical/x-pdb")}
-
-                # mode-specific fields
-                if pred_type.value == "functional":
+                # mode-specific fields for POST (if target_url is set)
+                if mode == "functional":
                     data[FN["path_length"]] = str(get_big_len())
-                elif pred_type.value == "paths_init_len":
-                    if not _is_valid_chain(init_chain.value or ""):
-                        raise ValueError("Chain of initial residue must be a single character.")
+                elif mode == "paths_init_len":
                     data.update({
-                        "index_initial": int(init_idx.value),
-                        "chain_initial": (init_chain.value or "").strip(),
                         "length_paths":  int(get_short_len()),
                         "number_paths":  int(get_num_paths_2()),
+                        "index_initial": int(init_idx.value),
+                        "chain_initial": (init_chain.value or "").strip(),
                     })
-                elif pred_type.value == "paths_init_final":
-                    if not _is_valid_chain(init_chain.value or ""):
-                        raise ValueError("Chain of initial residue must be a single character.")
-                    if not _is_valid_chain(final_chain.value or ""):
-                        raise ValueError("Chain of final residue must be a single character.")
+                elif mode == "paths_init_final":
                     data.update({
                         "index_initial": int(init_idx.value),
                         "chain_initial": (init_chain.value or "").strip(),
@@ -263,10 +345,7 @@ def launch(
                         "number_paths":  int(get_num_paths_3()),
                     })
 
-                # Save a local copy of the PDB for the user
-                with open(pdb_name, "wb") as f:
-                    f.write(pdb_bytes)
-                print(f"Saved local copy: {os.getcwd()}/{pdb_name}")
+                files = {FN["pdb_file"]: (pdb_name, pdb_bytes, "chemical/x-pdb")}
 
                 if not target_url:
                     # preview only
