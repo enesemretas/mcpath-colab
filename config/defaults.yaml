@@ -27,3 +27,8 @@ path_length_options:
   - 2000000
   - 3000000
   - 4000000
+
+branding:
+  logo_url: "https://raw.githubusercontent.com/enesemretas/mcpath-colab/main/assets/mcpath_logo.png"
+  logo_height: 96     # px
+  logo_align: "center"  # "center", "left", or "right"
