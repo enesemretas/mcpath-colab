@@ -1,9 +1,13 @@
-# Default parameters for MCPath-style Colab form
+# config/defaults.yaml
 pdb_code: 6OIK
 chain_id: A
-path_length: 100000           # default selected value
+path_length: 100000        # default selection (can be any integer)
 email: ""
-target_url: ""                # e.g. "https://example.org/mcpath/submit"
+
+# leave empty to preview only; set to your real endpoint to POST
+target_url: ""
+
+# map your server’s expected field names
 field_names:
   pdb_code: pdbcode
   pdb_file: pdbfile
@@ -11,7 +15,7 @@ field_names:
   path_length: path_length
   email: email
 
-# Options shown in the dropdown
+# NEW: values shown in the List mode of the path-length selector
 path_length_options:
   - 100000
   - 200000
