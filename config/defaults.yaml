@@ -14,6 +14,7 @@ field_names:
   chain_id: chainid
   path_length: path_length
   email: email
+  save_dir: "/content/mcpath_uploads"
 
 # NEW: values shown in the List mode of the path-length selector
 path_length_options:
