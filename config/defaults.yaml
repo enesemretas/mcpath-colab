@@ -1,0 +1,12 @@
+# Default parameters for MCPath-style Colab form
+pdb_code: 6OIK
+chain_id: A
+path_length: 100000
+email: ""
+target_url: ""          # e.g. "https://example.org/mcpath/submit"
+field_names:
+  pdb_code: pdbcode
+  pdb_file: pdbfile
+  chain_id: chainid
+  path_length: path_length
+  email: email
