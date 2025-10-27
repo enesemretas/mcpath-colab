@@ -39,6 +39,23 @@ def _list_or_custom(label: str, options, default_value, minv, maxv, step=1):
 
     return mode, dd, txt, get_value
 
+def _logo_widget(branding: dict):
+    """Create a centered/left/right logo if branding['logo_url'] is set."""
+    url = (branding.get("logo_url") or "").strip()
+    if not url:
+        return None
+    height = int(branding.get("logo_height", 96))
+    align  = (branding.get("logo_align") or "center").lower()
+    try:
+        img_bytes = requests.get(url, timeout=20).content
+        img = W.Image(value=img_bytes, format="png", layout=W.Layout(height=f"{height}px"))
+        jc = {"center":"center", "left":"flex-start", "right":"flex-end"}.get(align, "center")
+        box = W.HBox([img], layout=W.Layout(justify_content=jc))
+        return box
+    except Exception:
+        # If the URL fails, just skip the logo silently
+        return None
+
 # -------------------- main UI --------------------
 def launch(
     defaults_url="https://raw.githubusercontent.com/enesemretas/mcpath-colab/main/config/defaults.yaml",
@@ -48,6 +65,9 @@ def launch(
     cfg = yaml.safe_load(requests.get(defaults_url, timeout=30).text)
     target_url = cfg.get("target_url", "").strip()
     FN = cfg["field_names"]
+
+    # ---------- Branding / logo ----------
+    logo = _logo_widget(cfg.get("branding", {}))
 
     # ---------- PDB: code OR upload (with "or" & filename label) ----------
     pdb_code   = W.Text(value=str(cfg.get("pdb_code", "")), description="PDB code:")
@@ -103,7 +123,7 @@ def launch(
     num_paths_opts_mode2 = [1000, 2000, 3000, 5000, 10000, 20000, 30000, 40000, 50000]
     (np_mode_2, np_dd_2, np_txt_2, get_num_paths_2) = _list_or_custom(
         label="Number of Paths:", options=num_paths_opts_mode2, default_value=1000,
-        minv=1, maxv=10_000_000, step=100
+        minv=1, max=10_000_000, step=100
     )
 
     # ---------- Mode 3: initial & final residues + number of paths ----------
@@ -113,7 +133,7 @@ def launch(
     num_paths_opts_mode3 = [1000, 2000, 3000, 5000, 10000, 30000, 50000]
     (np_mode_3, np_dd_3, np_txt_3, get_num_paths_3) = _list_or_custom(
         label="Number of Paths:", options=num_paths_opts_mode3, default_value=1000,
-        minv=1, maxv=10_000_000, step=100
+        minv=1, max=10_000_000, step=100
     )
 
     # ---------- Actions & output ----------
@@ -122,7 +142,7 @@ def launch(
     out        = W.Output()
 
     # ---------- Grouped layouts per section ----------
-    pdb_row = W.HBox([pdb_code, or_lbl, pdb_upload, file_lbl])
+    pdb_row = W.HBox([pdb_code, W.HTML("&nbsp;"), or_lbl, pdb_upload, file_lbl])
 
     functional_box = W.VBox([pl_mode_big, pl_dd_big, pl_txt_big])
     mode2_box = W.VBox([
@@ -136,7 +156,6 @@ def launch(
         np_mode_3, np_dd_3, np_txt_3
     ])
 
-    # visibility controller
     def _sync_mode(*_):
         functional_box.layout.display = ""
         mode2_box.layout.display = "none"
@@ -152,7 +171,9 @@ def launch(
     pred_type.observe(_sync_mode, names="value")
 
     # ---------- Render the full UI ----------
-    display(W.VBox([
+    children = []
+    if logo: children.append(logo)
+    children += [
         W.HTML(f"<h3>{show_title}</h3>"),
         pdb_row,
         W.HTML("<b>Prediction of:</b>"),
@@ -163,7 +184,8 @@ def launch(
         chain_id, email,
         W.HBox([btn_submit, btn_clear]),
         W.HTML("<hr>"), out
-    ]))
+    ]
+    display(W.VBox(children))
 
     # -------------------- handlers --------------------
     def on_clear(_):
