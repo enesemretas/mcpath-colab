@@ -14,46 +14,44 @@ def _fetch_rcsb(code: str) -> bytes:
     return r.content
 
 def _list_or_custom(label: str, options, default_value, minv, maxv, step=1):
-    """Factory for a (List|Custom) toggle + Dropdown + BoundedIntText trio."""
+    """
+    One-at-a-time input using a StackedWidget so List/Custom never show together.
+    Returns: (mode_toggle, stacked_widget, dropdown_widget, int_text_widget, get_value_fn)
+    """
     options = sorted({int(x) for x in options})
     default_value = int(default_value)
     if default_value not in options:
         options = sorted(options + [default_value])
 
-    # wider labels & inputs so text is fully visible
     common_layout = W.Layout(width="420px", min_width="360px")
 
     mode = W.ToggleButtons(
-        options=[("List","list"), ("Custom","custom")],
+        options=[("List", "list"), ("Custom", "custom")],
         value="list",
         description="Input:",
         layout=W.Layout(width="240px")
     )
-    dd   = W.Dropdown(
+    dd = W.Dropdown(
         options=options, value=default_value,
         description=(label if label.endswith(":") else f"{label}:"),
         layout=common_layout
     )
-    txt  = W.BoundedIntText(
+    txt = W.BoundedIntText(
         value=default_value, min=minv, max=maxv, step=step,
         description=(label if label.endswith(":") else f"{label}:"),
         layout=common_layout
     )
 
-    def _sync(*_):
-        if mode.value == "list":
-            dd.layout.display = ""
-            txt.layout.display = "none"
-        else:
-            dd.layout.display = "none"
-            txt.layout.display = ""
-    _sync()
-    mode.observe(_sync, names="value")
+    stack = W.StackedWidget(children=[dd, txt], selected_index=0)
+
+    def _on_mode(change):
+        stack.selected_index = 0 if change["new"] == "list" else 1
+    mode.observe(_on_mode, names="value")
 
     def get_value():
         return int(dd.value if mode.value == "list" else txt.value)
 
-    return mode, dd, txt, get_value
+    return mode, stack, dd, txt, get_value
 
 def _logo_widget(branding: dict):
     """Create a centered/left/right logo if branding['logo_url'] is set."""
@@ -69,7 +67,6 @@ def _logo_widget(branding: dict):
         box = W.HBox([img], layout=W.Layout(justify_content=jc))
         return box
     except Exception:
-        # If the URL fails, just skip the logo silently
         return None
 
 # -------------------- main UI --------------------
@@ -83,16 +80,16 @@ def launch(
     FN = cfg["field_names"]
 
     # Where to save files (PDB + mcpath_input.txt)
-    SAVE_DIR = cfg.get("save_dir", "/content")  # you can set in YAML to a Drive path
+    SAVE_DIR = cfg.get("save_dir", "/content")
     os.makedirs(SAVE_DIR, exist_ok=True)
 
     # ---------- Branding / logo ----------
     logo = _logo_widget(cfg.get("branding", {}))
 
-    # common wide layout so labels are readable
+    # wide layout so labels are readable
     wide = W.Layout(width="420px", min_width="360px")
 
-    # ---------- PDB: code OR upload (with "or" & filename label) ----------
+    # ---------- PDB: code OR upload ----------
     pdb_code   = W.Text(value=str(cfg.get("pdb_code", "")),
                         description="PDB code:",
                         layout=wide)
@@ -134,7 +131,7 @@ def launch(
         1000000, 2000000, 3000000, 4000000
     ])
     big_default = int(cfg.get("path_length", big_opts[0] if big_opts else 100000))
-    (pl_mode_big, pl_dd_big, pl_txt_big, get_big_len) = _list_or_custom(
+    (pl_mode_big, pl_stack_big, pl_dd_big, pl_txt_big, get_big_len) = _list_or_custom(
         label="Path length", options=big_opts, default_value=big_default,
         minv=1, maxv=10_000_000, step=1000
     )
@@ -147,13 +144,13 @@ def launch(
                         placeholder="A", layout=wide)
 
     short_len_opts = [5, 8, 10, 13, 15, 20, 25, 30]
-    (pl_mode_short, pl_dd_short, pl_txt_short, get_short_len) = _list_or_custom(
+    (pl_mode_short, pl_stack_short, pl_dd_short, pl_txt_short, get_short_len) = _list_or_custom(
         label="Length of Paths", options=short_len_opts, default_value=5,
         minv=1, maxv=10_000, step=1
     )
 
     num_paths_opts_mode2 = [1000, 2000, 3000, 5000, 10000, 20000, 30000, 40000, 50000]
-    (np_mode_2, np_dd_2, np_txt_2, get_num_paths_2) = _list_or_custom(
+    (np_mode_2, np_stack_2, np_dd_2, np_txt_2, get_num_paths_2) = _list_or_custom(
         label="Number of Paths", options=num_paths_opts_mode2, default_value=1000,
         minv=1, maxv=10_000_000, step=100
     )
@@ -166,7 +163,7 @@ def launch(
                          placeholder="B", layout=wide)
 
     num_paths_opts_mode3 = [1000, 2000, 3000, 5000, 10000, 30000, 50000]
-    (np_mode_3, np_dd_3, np_txt_3, get_num_paths_3) = _list_or_custom(
+    (np_mode_3, np_stack_3, np_dd_3, np_txt_3, get_num_paths_3) = _list_or_custom(
         label="Number of Paths", options=num_paths_opts_mode3, default_value=1000,
         minv=1, maxv=10_000_000, step=100
     )
@@ -178,18 +175,19 @@ def launch(
 
     # ---------- Grouped layouts per section ----------
     pdb_row = W.HBox([pdb_code, W.HTML("&nbsp;"), or_lbl, pdb_upload, file_lbl],
-                     layout=W.Layout(align_items="center", justify_content="flex-start", flex_flow="row wrap", gap="10px"))
+                     layout=W.Layout(align_items="center", justify_content="flex-start",
+                                     flex_flow="row wrap", gap="10px"))
 
-    functional_box = W.VBox([pl_mode_big, pl_dd_big, pl_txt_big])
+    functional_box = W.VBox([pl_mode_big, pl_stack_big])
     mode2_box = W.VBox([
         init_idx, init_chain,
-        pl_mode_short, pl_dd_short, pl_txt_short,
-        np_mode_2, np_dd_2, np_txt_2
+        pl_mode_short, pl_stack_short,
+        np_mode_2,   np_stack_2
     ])
     mode3_box = W.VBox([
         init_idx, init_chain,
         final_idx, final_chain,
-        np_mode_3, np_dd_3, np_txt_3
+        np_mode_3,  np_stack_3
     ])
 
     def _sync_mode(*_):
@@ -231,13 +229,18 @@ def launch(
         chain_id.value = ""
         email.value = ""
         pred_type.value = "functional"
-        # reset mode widgets
-        pl_mode_big.value = "list"; pl_dd_big.value = pl_dd_big.options[0]; pl_txt_big.value = int(pl_dd_big.options[0])
+        # reset to List for all stacks
+        pl_mode_big.value = "list"
+        pl_mode_short.value = "list"
+        np_mode_2.value = "list"
+        np_mode_3.value = "list"
+        # reset numeric/text values
+        pl_dd_big.value = pl_dd_big.options[0]; pl_txt_big.value = int(pl_dd_big.options[0])
         init_idx.value = 1; init_chain.value = ""
-        pl_mode_short.value = "list"; pl_dd_short.value = pl_dd_short.options[0]; pl_txt_short.value = int(pl_dd_short.options[0])
-        np_mode_2.value = "list"; np_dd_2.value = np_dd_2.options[0]; np_txt_2.value = int(np_dd_2.options[0])
+        pl_dd_short.value = pl_dd_short.options[0]; pl_txt_short.value = int(pl_dd_short.options[0])
+        np_dd_2.value = np_dd_2.options[0];       np_txt_2.value = int(np_dd_2.options[0])
         final_idx.value = 1; final_chain.value = ""
-        np_mode_3.value = "list"; np_dd_3.value = np_dd_3.options[0]; np_txt_3.value = int(np_dd_3.options[0])
+        np_dd_3.value = np_dd_3.options[0];       np_txt_3.value = int(np_dd_3.options[0])
         with out: clear_output()
 
     def _collect_pdb_bytes():
