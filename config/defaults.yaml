@@ -11,7 +11,7 @@ field_names:
   path_length: path_length
   email: email
 
-# NEW: options shown in the dropdown
+# Options shown in the dropdown
 path_length_options:
   - 100000
   - 200000
