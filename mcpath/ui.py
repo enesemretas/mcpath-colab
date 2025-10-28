@@ -97,7 +97,7 @@ def _logo_widget(branding: dict):
     height = int(branding.get("logo_height", 96))
     align  = (branding.get("logo_align") or "center").lower()
     try:
-        img_bytes = requests.get(url, timeout=20).content
+        img_bytes = requests.get(url, timeout=10).content
         img = W.Image(value=img_bytes, format="png", layout=W.Layout(height=f"{height}px"))
         jc = {"center":"center", "left":"flex-start", "right":"flex-end"}.get(align, "center")
         return W.HBox([img], layout=W.Layout(justify_content=jc))
@@ -110,7 +110,7 @@ def launch(
     show_title="MCPath-style Parameters"
 ):
     """Launch the MCPath parameter form."""
-    cfg = yaml.safe_load(requests.get(defaults_url, timeout=30).text)
+    cfg = yaml.safe_load(requests.get(defaults_url, timeout=15).text)
     target_url = cfg.get("target_url", "").strip()
     FN = cfg["field_names"]
 
@@ -261,9 +261,7 @@ def launch(
         chain_id.value = ""
         email.value = ""
         pred_type.value = "functional"
-        # reset mode displays
         _sync_mode()
-        # reset toggles & values
         pl_mode_big.value = "list"
         pl_mode_short.value = "list"
         np_mode_2.value = "list"
@@ -289,23 +287,23 @@ def launch(
         with out:
             clear_output()
             try:
-                # basic validation
+                print("▶ Validating inputs…")
                 chain_global = chain_id.value.strip()
                 if not _is_valid_chain(chain_global):
                     raise ValueError("Chain ID must be a single character (e.g., A).")
                 if not _is_valid_email(email.value.strip()):
                     raise ValueError("Invalid email format.")
 
-                # obtain PDB bytes & name
+                print("▶ Getting PDB (upload or RCSB)…")
                 pdb_bytes, pdb_name = _collect_pdb_bytes()
 
-                # ---- Save PDB to SAVE_DIR ----
+                # Save PDB
                 save_path = os.path.join(SAVE_DIR, pdb_name)
                 with open(save_path, "wb") as f:
                     f.write(pdb_bytes)
                 print(f"Saved local copy: {save_path}")
 
-                # ---- Build mcpath_input.txt rows based on mode ----
+                # Build mcpath_input.txt
                 input_path = os.path.join(os.path.dirname(save_path), "mcpath_input.txt")
                 rows = []
                 mode = pred_type.value
@@ -352,7 +350,7 @@ def launch(
                         f.write(str(r).strip() + "\n")
                 print(f"Input file saved: {input_path}")
 
-                # ---- Optional POST payload (if target_url set) ----
+                # Optional POST
                 data = {
                     "prediction_mode": mode,
                     FN["chain_id"]: chain_global,
@@ -387,69 +385,69 @@ def launch(
                     preview = dict(data); preview["attached_file"] = pdb_name
                     print(preview)
                 else:
-                    print(f"Submitting to {target_url} …")
-                    r = requests.post(target_url, data=data, files=files, timeout=180)
+                    print("▶ POSTing to server… (≤20s timeout)")
+                    r = requests.post(target_url, data=data, files=files, timeout=20)
                     print("HTTP", r.status_code)
                     try: print("JSON:", r.json())
                     except Exception: print("Response (≤800 chars):\n", r.text[:800])
 
-# ---- Run Octave after submit? ----
-if bool(cfg.get("run_octave_after_submit", False)):
-    SAVE_DIR_REAL = os.path.dirname(save_path)
+                # ---- Run Octave after submit? (INSIDE on_submit) ----
+                if bool(cfg.get("run_octave_after_submit", False)):
+                    SAVE_DIR_REAL = os.path.dirname(save_path)
 
-    # Ensure pdbreader.m (shim or URL)
-    rp_parser = os.path.join(SAVE_DIR_REAL, "pdbreader.m")
-    pdbreader_url = (cfg.get("pdbreader_url") or "").strip()
-    try:
-        if pdbreader_url:
-            print(f"Fetching pdbreader.m (≤15s): {pdbreader_url}")
-            rb = requests.get(pdbreader_url, timeout=15).content
-            with open(rp_parser, "wb") as f: f.write(rb)
-            print(f"Saved: {rp_parser}")
-        else:
-            with open(rp_parser, "w") as f: f.write(PDBREADER_SHIM_TEXT)
-            print(f"Using built-in pdbreader shim at: {rp_parser}")
-    except Exception as _e:
-        with open(rp_parser, "w") as f: f.write(PDBREADER_SHIM_TEXT)
-        print(f"(Fallback) Using built-in pdbreader shim at: {rp_parser}")
+                    # Ensure pdbreader.m (shim or URL)
+                    rp_parser = os.path.join(SAVE_DIR_REAL, "pdbreader.m")
+                    pdbreader_url = (cfg.get("pdbreader_url") or "").strip()
+                    try:
+                        if pdbreader_url:
+                            print(f"Fetching pdbreader.m (≤15s): {pdbreader_url}")
+                            rb = requests.get(pdbreader_url, timeout=15).content
+                            with open(rp_parser, "wb") as f: f.write(rb)
+                            print(f"Saved: {rp_parser}")
+                        else:
+                            with open(rp_parser, "w") as f: f.write(PDBREADER_SHIM_TEXT)
+                            print(f"Using built-in pdbreader shim at: {rp_parser}")
+                    except Exception as _e:
+                        with open(rp_parser, "w") as f: f.write(PDBREADER_SHIM_TEXT)
+                        print(f"(Fallback) Using built-in pdbreader shim at: {rp_parser}")
 
-    # Ensure readpdb.m
-    rp_readpdb = os.path.join(SAVE_DIR_REAL, "readpdb.m")
-    have_readpdb = False
-    try:
-        local_candidate = "/content/mcpath-colab/matlab/readpdb.m"
-        if os.path.exists(local_candidate):
-            with open(local_candidate, "rb") as src, open(rp_readpdb, "wb") as dst:
-                dst.write(src.read())
-            have_readpdb = True
-            print(f"Copied readpdb.m to: {rp_readpdb}")
-    except Exception:
-        pass
-    if not have_readpdb:
-        readpdb_url = (cfg.get("readpdb_url") or "").strip()
-        if readpdb_url:
-            try:
-                print(f"Fetching readpdb.m (≤15s): {readpdb_url}")
-                rb = requests.get(readpdb_url, timeout=15).content
-                with open(rp_readpdb, "wb") as f: f.write(rb)
-                have_readpdb = True
-                print(f"Saved: {rp_readpdb}")
-            except Exception as e:
-                print("WARN: failed to fetch readpdb.m:", e)
-    if not have_readpdb:
-        print("❌ readpdb.m not found. Set readpdb_url in config or place it in mcpath-colab/matlab/")
-        return
+                    # Ensure readpdb.m
+                    rp_readpdb = os.path.join(SAVE_DIR_REAL, "readpdb.m")
+                    have_readpdb = False
+                    try:
+                        local_candidate = "/content/mcpath-colab/matlab/readpdb.m"
+                        if os.path.exists(local_candidate):
+                            with open(local_candidate, "rb") as src, open(rp_readpdb, "wb") as dst:
+                                dst.write(src.read())
+                            have_readpdb = True
+                            print(f"Copied readpdb.m to: {rp_readpdb}")
+                    except Exception:
+                        pass
+                    if not have_readpdb:
+                        readpdb_url = (cfg.get("readpdb_url") or "").strip()
+                        if readpdb_url:
+                            try:
+                                print(f"Fetching readpdb.m (≤15s): {readpdb_url}")
+                                rb = requests.get(readpdb_url, timeout=15).content
+                                with open(rp_readpdb, "wb") as f: f.write(rb)
+                                have_readpdb = True
+                                print(f"Saved: {rp_readpdb}")
+                            except Exception as e:
+                                print("WARN: failed to fetch readpdb.m:", e)
+                    if not have_readpdb:
+                        print("❌ readpdb.m not found. Set readpdb_url in config or place it in mcpath-colab/matlab/")
+                        return
 
-    # Write runner with diary + fail fast
-    runner_path = os.path.join(SAVE_DIR_REAL, "run_mcpath.m")
-    extra_paths = cfg.get("matlab_paths", []) or []
-    addpath_lines = ""
-    for p in extra_paths:
-        p_esc = p.replace("'", "''")
-        addpath_lines += f"addpath(genpath('{p_esc}'));\n"
-    addpath_lines += "addpath(genpath('/content')); addpath(genpath('/content/mcpath-colab'));\n"
+                    # Runner with diary + fail fast
+                    runner_path = os.path.join(SAVE_DIR_REAL, "run_mcpath.m")
+                    extra_paths = cfg.get("matlab_paths", []) or []
+                    addpath_lines = ""
+                    for p in extra_paths:
+                        p_esc = p.replace("'", "''")
+                        addpath_lines += f"addpath(genpath('{p_esc}'));\n"
+                    addpath_lines += "addpath(genpath('/content')); addpath(genpath('/content/mcpath-colab'));\n"
 
-    runner = f"""
+                    runner = f"""
 diary off; diary('octave.log');  % start logging
 try
   {addpath_lines}
@@ -467,41 +465,44 @@ catch err
   diary off; exit(1);
 end
 """
-    with open(runner_path, "w") as f:
-        f.write(runner)
+                    with open(runner_path, "w") as f:
+                        f.write(runner)
 
-    # Run Octave with a hard timeout (e.g., 180 s). No capture_output → stream to notebook.
-    cd_escaped = SAVE_DIR_REAL.replace("'", "''")
-    print("Launching Octave… (timeout=180s)")
-    try:
-        proc = subprocess.run(
-            ["octave", "-qf", "--eval", f"cd('{cd_escaped}'); run('run_mcpath.m');"],
-            text=True, timeout=180
-        )
-        rc = proc.returncode
-    except subprocess.TimeoutExpired:
-        print("❌ Octave timed out after 180s. Check /content/octave.log")
-        rc = -1
+                    # Run Octave with a hard timeout
+                    cd_escaped = SAVE_DIR_REAL.replace("'", "''")
+                    print("▶ Launching Octave… (timeout=180s)")
+                    try:
+                        proc = subprocess.run(
+                            ["octave", "-qf", "--eval", f"cd('{cd_escaped}'); run('run_mcpath.m');"],
+                            text=True, timeout=180
+                        )
+                        rc = proc.returncode
+                    except subprocess.TimeoutExpired:
+                        print("❌ Octave timed out after 180s. Check /content/octave.log")
+                        rc = -1
 
-    # Always show tail of the diary log if present
-    log_path = os.path.join(SAVE_DIR_REAL, "octave.log")
-    if os.path.exists(log_path):
-        try:
-            with open(log_path, "r") as lf:
-                log = lf.read()
-            tail = log[-2000:] if len(log) > 2000 else log
-            print("\n--- octave.log (tail) ---\n", tail)
-        except Exception:
-            pass
+                    # Show diary tail
+                    log_path = os.path.join(SAVE_DIR_REAL, "octave.log")
+                    if os.path.exists(log_path):
+                        try:
+                            with open(log_path, "r") as lf:
+                                log = lf.read()
+                            tail = log[-2000:] if len(log) > 2000 else log
+                            print("\n--- octave.log (tail) ---\n", tail)
+                        except Exception:
+                            pass
 
-    if rc != 0:
-        err_file = os.path.join(SAVE_DIR_REAL, "error")
-        if os.path.exists(err_file):
-            with open(err_file, "r") as ef:
-                print("\n--- error file ---\n", ef.read()[:2000])
-        print("❌ Octave failed. Return code:", rc)
-    else:
-        print("✅ Octave finished successfully.")
+                    if rc != 0:
+                        err_file = os.path.join(SAVE_DIR_REAL, "error")
+                        if os.path.exists(err_file):
+                            with open(err_file, "r") as ef:
+                                print("\n--- error file ---\n", ef.read()[:2000])
+                        print("❌ Octave failed. Return code:", rc)
+                    else:
+                        print("✅ Octave finished successfully.")
+
+            except Exception as e:
+                print("❌", e)
 
     btn_clear.on_click(on_clear)
     btn_submit.on_click(on_submit)
