@@ -13,7 +13,7 @@ def _fetch_rcsb(code: str) -> bytes:
     r = requests.get(url, timeout=60); r.raise_for_status()
     return r.content
 
-def _list_or_custom(label: str, options, default_value, minv, maxv, step=1):
+def _list_or_custom(label: str, options, default_value, minv, maxv, step=1, desc_style=None):
     """
     One-at-a-time input: a small container whose single child is either a Dropdown (List)
     or a BoundedIntText (Custom). Returns:
@@ -30,17 +30,20 @@ def _list_or_custom(label: str, options, default_value, minv, maxv, step=1):
         options=[("List", "list"), ("Custom", "custom")],
         value="list",
         description="Input:",
-        layout=W.Layout(width="240px")
+        layout=W.Layout(width="240px"),
+        style=desc_style
     )
     dd = W.Dropdown(
         options=options, value=default_value,
         description=(label if label.endswith(":") else f"{label}:"),
-        layout=common_layout
+        layout=common_layout,
+        style=desc_style
     )
     txt = W.BoundedIntText(
         value=default_value, min=minv, max=maxv, step=step,
         description=(label if label.endswith(":") else f"{label}:"),
-        layout=common_layout
+        layout=common_layout,
+        style=desc_style
     )
 
     # container holds the active input only
@@ -88,13 +91,16 @@ def launch(
     # ---------- Branding / logo ----------
     logo = _logo_widget(cfg.get("branding", {}))
 
-    # wide layout so labels are readable
+    # wider description column so labels aren't truncated
+    DESC = {'description_width': '240px'}
+
+    # wide layout so inputs are readable
     wide = W.Layout(width="420px", min_width="360px")
 
     # ---------- PDB: code OR upload ----------
     pdb_code   = W.Text(value=str(cfg.get("pdb_code", "")),
                         description="PDB code:",
-                        layout=wide)
+                        layout=wide, style=DESC)
     or_lbl     = W.HTML("<b>&nbsp;&nbsp;or&nbsp;&nbsp;</b>")
     pdb_upload = W.FileUpload(accept=".pdb", multiple=False, description="Choose File")
     file_lbl   = W.Label("No file chosen")
@@ -110,10 +116,10 @@ def launch(
     # ---------- Always-present fields ----------
     chain_id   = W.Text(value=str(cfg.get("chain_id", "")),
                         description="Chain ID:",
-                        layout=wide)
+                        layout=wide, style=DESC)
     email      = W.Text(value=str(cfg.get("email", "")),
                         description="Email (opt):",
-                        layout=wide)
+                        layout=wide, style=DESC)
 
     # ---------- Prediction type ----------
     pred_type = W.RadioButtons(
@@ -124,7 +130,8 @@ def launch(
         ],
         value="functional",
         description="Prediction:",
-        layout=W.Layout(width="auto")
+        layout=W.Layout(width="auto"),
+        style=DESC
     )
 
     # ---------- Functional mode: big path_length (YAML-driven List/Custom) ----------
@@ -135,39 +142,39 @@ def launch(
     big_default = int(cfg.get("path_length", big_opts[0] if big_opts else 100000))
     (pl_mode_big, pl_container_big, pl_dd_big, pl_txt_big, get_big_len) = _list_or_custom(
         label="Path length", options=big_opts, default_value=big_default,
-        minv=1, maxv=10_000_000, step=1000
+        minv=1, maxv=10_000_000, step=1000, desc_style=DESC
     )
 
     # ---------- Mode 2: initial residue + short path length + number of paths ----------
     init_idx   = W.BoundedIntText(value=1, min=1, max=1_000_000, step=1,
                                   description="Index of initial residue:",
-                                  layout=wide)
+                                  layout=wide, style=DESC)
     init_chain = W.Text(value="", description="Chain of initial residue:",
-                        placeholder="A", layout=wide)
+                        placeholder="A", layout=wide, style=DESC)
 
     short_len_opts = [5, 8, 10, 13, 15, 20, 25, 30]
     (pl_mode_short, pl_container_short, pl_dd_short, pl_txt_short, get_short_len) = _list_or_custom(
         label="Length of Paths", options=short_len_opts, default_value=5,
-        minv=1, maxv=10_000, step=1
+        minv=1, maxv=10_000, step=1, desc_style=DESC
     )
 
     num_paths_opts_mode2 = [1000, 2000, 3000, 5000, 10000, 20000, 30000, 40000, 50000]
     (np_mode_2, np_container_2, np_dd_2, np_txt_2, get_num_paths_2) = _list_or_custom(
         label="Number of Paths", options=num_paths_opts_mode2, default_value=1000,
-        minv=1, maxv=10_000_000, step=100
+        minv=1, maxv=10_000_000, step=100, desc_style=DESC
     )
 
     # ---------- Mode 3: initial & final residues + number of paths ----------
     final_idx   = W.BoundedIntText(value=1, min=1, max=1_000_000, step=1,
                                    description="Index of final residue:",
-                                   layout=wide)
+                                   layout=wide, style=DESC)
     final_chain = W.Text(value="", description="Chain of final residue:",
-                         placeholder="B", layout=wide)
+                         placeholder="B", layout=wide, style=DESC)
 
     num_paths_opts_mode3 = [1000, 2000, 3000, 5000, 10000, 30000, 50000]
     (np_mode_3, np_container_3, np_dd_3, np_txt_3, get_num_paths_3) = _list_or_custom(
         label="Number of Paths", options=num_paths_opts_mode3, default_value=1000,
-        minv=1, maxv=10_000_000, step=100
+        minv=1, maxv=10_000_000, step=100, desc_style=DESC
     )
 
     # ---------- Actions & output ----------
