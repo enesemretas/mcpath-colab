@@ -4,6 +4,7 @@ from IPython.display import display, clear_output
 import ipywidgets as W
 
 # -------------------- Octave pdbreader shim (fallback) --------------------
+# Only used if you don't supply a real pdbreader.m via cfg['pdbreader_url'].
 PDBREADER_SHIM_TEXT = r"""
 function pdb = pdbreader(filename)
   fid = fopen(filename,'r'); assert(fid>0,'pdbreader: cannot open %s',filename);
@@ -39,7 +40,6 @@ function pdb = pdbreader(filename)
 end
 """
 
-
 # -------------------- validators & helpers --------------------
 def _is_valid_pdb_code(c): return bool(re.fullmatch(r"[0-9A-Za-z]{4}", c.strip()))
 def _is_valid_chain(ch):   return bool(re.fullmatch(r"[A-Za-z0-9]", ch.strip()))
@@ -52,40 +52,35 @@ def _fetch_rcsb(code: str) -> bytes:
 
 def _list_or_custom(label: str, options, default_value, minv, maxv, step=1, desc_style=None):
     """
-    One-at-a-time input: a small container whose single child is either a Dropdown (List)
-    or a BoundedIntText (Custom). Returns:
-      (mode_toggle, container_box, dropdown_widget, int_text_widget, get_value_fn)
+    Switchable input: either a Dropdown (List) or a BoundedIntText (Custom).
+    Returns (mode_toggle, container_box, dropdown_widget, int_text_widget, get_value_fn).
     """
     options = sorted({int(x) for x in options})
     default_value = int(default_value)
     if default_value not in options:
         options = sorted(options + [default_value])
 
-    common_layout = W.Layout(width="420px", min_width="360px")
-
+    common_layout = W.Layout(width="460px", min_width="420px")
     mode = W.ToggleButtons(
         options=[("List", "list"), ("Custom", "custom")],
         value="list",
         description="Input:",
-        layout=W.Layout(width="240px"),
+        layout=W.Layout(width="260px"),
         style=desc_style
     )
     dd = W.Dropdown(
         options=options, value=default_value,
         description=(label if label.endswith(":") else f"{label}:"),
-        layout=common_layout,
-        style=desc_style
+        layout=common_layout, style=desc_style
     )
     txt = W.BoundedIntText(
         value=default_value, min=minv, max=maxv, step=step,
         description=(label if label.endswith(":") else f"{label}:"),
-        layout=common_layout,
-        style=desc_style
+        layout=common_layout, style=desc_style
     )
 
-    # container holds the active input only
+    # Only one visible at a time
     container = W.VBox([dd])
-
     def _on_mode(change):
         container.children = [dd] if change["new"] == "list" else [txt]
     mode.observe(_on_mode, names="value")
@@ -96,18 +91,15 @@ def _list_or_custom(label: str, options, default_value, minv, maxv, step=1, desc
     return mode, container, dd, txt, get_value
 
 def _logo_widget(branding: dict):
-    """Create a centered/left/right logo if branding['logo_url'] is set."""
     url = (branding.get("logo_url") or "").strip()
-    if not url:
-        return None
+    if not url: return None
     height = int(branding.get("logo_height", 96))
     align  = (branding.get("logo_align") or "center").lower()
     try:
         img_bytes = requests.get(url, timeout=20).content
         img = W.Image(value=img_bytes, format="png", layout=W.Layout(height=f"{height}px"))
         jc = {"center":"center", "left":"flex-start", "right":"flex-end"}.get(align, "center")
-        box = W.HBox([img], layout=W.Layout(justify_content=jc))
-        return box
+        return W.HBox([img], layout=W.Layout(justify_content=jc))
     except Exception:
         return None
 
@@ -116,23 +108,18 @@ def launch(
     defaults_url="https://raw.githubusercontent.com/enesemretas/mcpath-colab/main/config/defaults.yaml",
     show_title="MCPath-style Parameters"
 ):
-    """Launches the MCPath parameter form (UI only)."""
+    """Launch the MCPath parameter form."""
     cfg = yaml.safe_load(requests.get(defaults_url, timeout=30).text)
     target_url = cfg.get("target_url", "").strip()
     FN = cfg["field_names"]
 
-    # Where to save files (PDB + mcpath_input.txt)
     SAVE_DIR = cfg.get("save_dir", "/content")
     os.makedirs(SAVE_DIR, exist_ok=True)
 
-    # ---------- Branding / logo ----------
+    # Branding / labels
     logo = _logo_widget(cfg.get("branding", {}))
-
-    # wider description column so labels aren't truncated
-    DESC = {'description_width': '240px'}
-
-    # wide layout so inputs are readable
-    wide = W.Layout(width="420px", min_width="360px")
+    DESC = {'description_width': '260px'}
+    wide = W.Layout(width="460px", min_width="420px")
 
     # ---------- PDB: code OR upload ----------
     pdb_code   = W.Text(value=str(cfg.get("pdb_code", "")),
@@ -141,7 +128,6 @@ def launch(
     or_lbl     = W.HTML("<b>&nbsp;&nbsp;or&nbsp;&nbsp;</b>")
     pdb_upload = W.FileUpload(accept=".pdb", multiple=False, description="Choose File")
     file_lbl   = W.Label("No file chosen")
-
     def _on_upload_change(change):
         if pdb_upload.value:
             fname = next(iter(pdb_upload.value.keys()))
@@ -171,7 +157,7 @@ def launch(
         style=DESC
     )
 
-    # ---------- Functional mode: big path_length (YAML-driven List/Custom) ----------
+    # ---------- Functional mode: large path length ----------
     big_opts = cfg.get("path_length_options", [
         100000, 200000, 300000, 400000, 500000, 750000,
         1000000, 2000000, 3000000, 4000000
@@ -219,7 +205,7 @@ def launch(
     btn_clear  = W.Button(description="Clear",  button_style="warning", icon="trash")
     out        = W.Output()
 
-    # ---------- Grouped layouts per section ----------
+    # ---------- Grouped layouts ----------
     pdb_row = W.HBox([pdb_code, W.HTML("&nbsp;"), or_lbl, pdb_upload, file_lbl],
                      layout=W.Layout(align_items="center", justify_content="flex-start",
                                      flex_flow="row wrap", gap="10px"))
@@ -237,20 +223,19 @@ def launch(
     ])
 
     def _sync_mode(*_):
-        functional_box.layout.display = ""
+        functional_box.layout.display = "none"
         mode2_box.layout.display = "none"
         mode3_box.layout.display = "none"
-        if pred_type.value == "paths_init_len":
-            functional_box.layout.display = "none"
+        if pred_type.value == "functional":
+            functional_box.layout.display = ""
+        elif pred_type.value == "paths_init_len":
             mode2_box.layout.display = ""
-        elif pred_type.value == "paths_init_final":
-            functional_box.layout.display = "none"
-            mode2_box.layout.display = "none"
+        else:
             mode3_box.layout.display = ""
     _sync_mode()
     pred_type.observe(_sync_mode, names="value")
 
-    # ---------- Render the full UI ----------
+    # ---------- Render UI ----------
     children = []
     if logo: children.append(logo)
     children += [
@@ -275,12 +260,13 @@ def launch(
         chain_id.value = ""
         email.value = ""
         pred_type.value = "functional"
-        # reset to List modes
+        # reset mode displays
+        _sync_mode()
+        # reset toggles & values
         pl_mode_big.value = "list"
         pl_mode_short.value = "list"
         np_mode_2.value = "list"
         np_mode_3.value = "list"
-        # reset numeric/text values
         pl_dd_big.value = pl_dd_big.options[0]; pl_txt_big.value = int(pl_dd_big.options[0])
         init_idx.value = 1; init_chain.value = ""
         pl_dd_short.value = pl_dd_short.options[0]; pl_txt_short.value = int(pl_dd_short.options[0])
@@ -318,16 +304,16 @@ def launch(
                     f.write(pdb_bytes)
                 print(f"Saved local copy: {save_path}")
 
-                # ---- Build input file rows based on mode ----
+                # ---- Build mcpath_input.txt rows based on mode ----
                 input_path = os.path.join(os.path.dirname(save_path), "mcpath_input.txt")
                 rows = []
                 mode = pred_type.value
 
                 if mode == "functional":
                     rows = [
-                        "1",
-                        pdb_name,
-                        chain_global,
+                        "1",              # mode
+                        pdb_name,         # pdb file name
+                        chain_global,     # global chain
                         str(get_big_len()),
                         email.value.strip() or "-"
                     ]
@@ -344,7 +330,7 @@ def launch(
                         (init_chain.value or "").strip(),
                         email.value.strip() or "-"
                     ]
-                elif mode == "paths_init_final":
+                else:  # paths_init_final
                     if not _is_valid_chain(init_chain.value or ""):
                         raise ValueError("Chain of initial residue must be a single character.")
                     if not _is_valid_chain(final_chain.value or ""):
@@ -365,7 +351,7 @@ def launch(
                         f.write(str(r).strip() + "\n")
                 print(f"Input file saved: {input_path}")
 
-                # ---- Prepare payload for optional POST ----
+                # ---- Optional POST payload (if target_url set) ----
                 data = {
                     "prediction_mode": mode,
                     FN["chain_id"]: chain_global,
@@ -384,7 +370,7 @@ def launch(
                         "index_initial": int(init_idx.value),
                         "chain_initial": (init_chain.value or "").strip(),
                     })
-                elif mode == "paths_init_final":
+                else:
                     data.update({
                         "index_initial": int(init_idx.value),
                         "chain_initial": (init_chain.value or "").strip(),
@@ -403,26 +389,24 @@ def launch(
                     print(f"Submitting to {target_url} …")
                     r = requests.post(target_url, data=data, files=files, timeout=180)
                     print("HTTP", r.status_code)
-                    try:
-                        print("JSON:", r.json())
-                    except Exception:
-                        print("Response (≤800 chars):\n", r.text[:800])
+                    try: print("JSON:", r.json())
+                    except Exception: print("Response (≤800 chars):\n", r.text[:800])
 
-                # ---- Optionally run Octave after submit ----
+                # ---- Run Octave after submit? ----
                 if bool(cfg.get("run_octave_after_submit", False)):
                     SAVE_DIR_REAL = os.path.dirname(save_path)
                     rp = os.path.join(SAVE_DIR_REAL, "pdbreader.m")
-                    # Try to fetch real readpdb.m; fall back to shim
-                    readpdb_url = (cfg.get("readpdb_url") or "").strip()
+                    # Try to fetch real pdbreader.m; else fall back to shim
+                    pdbreader_url = (cfg.get("pdbreader_url") or "").strip()
                     try:
-                        if readpdb_url:
-                            rb = requests.get(readpdb_url, timeout=30).content
+                        if pdbreader_url:
+                            rb = requests.get(pdbreader_url, timeout=30).content
                             with open(rp, "wb") as f: f.write(rb)
-                            print(f"Fetched readpdb.m from URL to: {rp}")
+                            print(f"Fetched pdbreader.m from URL to: {rp}")
                         else:
-                            raise RuntimeError("No readpdb_url set; using shim.")
+                            raise RuntimeError("No pdbreader_url set; using shim.")
                     except Exception as _e:
-                        with open(rp, "w") as f: f.write(PDBREAD_SHIM_TEXT)
+                        with open(rp, "w") as f: f.write(PDBREADER_SHIM_TEXT)
                         print(f"Using built-in pdbreader shim at: {rp}")
 
                     # Write a tiny driver to run your MATLAB/Octave snippet
@@ -434,6 +418,7 @@ try
   while ischar(line), a{end+1,1}=line; line=fgetl(fid); end
   fclose(fid);
   % a{2} = pdb filename, a{3} = global chain ID
+  % Your main analysis function still named readpdb:
   readpdb(a{2}, a{3});
 catch err
   fiderr = fopen('error','w');
@@ -450,7 +435,7 @@ exit
                         ["octave", "-qf", "--eval", f"cd('{cd_escaped}'); run('run_mcpath.m');"],
                         text=True, capture_output=True
                     )
-                    # show short logs
+                    # short logs
                     if proc.stdout:
                         print("Octave stdout (tail):\n", proc.stdout[-800:])
                     if proc.returncode != 0:
