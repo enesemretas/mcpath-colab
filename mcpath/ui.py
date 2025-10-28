@@ -1,7 +1,43 @@
 # mcpath/ui.py
-import os, re, requests, yaml
+import os, re, requests, yaml, subprocess
 from IPython.display import display, clear_output
 import ipywidgets as W
+
+# -------------------- Octave pdbread shim (fallback) --------------------
+PDBREAD_SHIM_TEXT = r"""
+function pdb = pdbread(filename)
+  fid = fopen(filename,'r'); assert(fid>0,'pdbread: cannot open %s',filename);
+  Atoms = struct('AtomSerNo',{},'AtomName',{},'altLoc',{},'resName',{}, ...
+                 'chainID',{},'resSeq',{},'X',{},'Y',{},'Z',{},'element',{},'iCode',{});
+  k=0;
+  while true
+    t=fgetl(fid); if ~ischar(t), break; end
+    if length(t)>=54 && (strncmp(t,'ATOM  ',6) || strncmp(t,'HETATM',6))
+      k=k+1; s=@(a,b) strtrim(t(a:min(b,length(t))));
+      Atoms(k).AtomSerNo=str2double(s(7,11));
+      Atoms(k).AtomName =s(13,16);
+      Atoms(k).altLoc   =s(17,17);
+      Atoms(k).resName  =s(18,20);
+      Atoms(k).chainID  =s(22,22);
+      Atoms(k).resSeq   =str2double(s(23,26));
+      Atoms(k).iCode    =s(27,27);
+      Atoms(k).X        =str2double(s(31,38));
+      Atoms(k).Y        =str2double(s(39,46));
+      Atoms(k).Z        =str2double(s(47,54));
+      if length(t)>=78
+        elem=s(77,78);
+      else
+        nm=regexprep(Atoms(k).AtomName,'[^A-Za-z]',''); elem='';
+        if ~isempty(nm), elem=nm(1); end
+      end
+      Atoms(k).element = elem;
+    end
+  end
+  fclose(fid);
+  pdb.Header = struct();
+  pdb.Model  = struct('Atom', Atoms);
+end
+"""
 
 # -------------------- validators & helpers --------------------
 def _is_valid_pdb_code(c): return bool(re.fullmatch(r"[0-9A-Za-z]{4}", c.strip()))
@@ -338,7 +374,6 @@ def launch(
                 if email.value.strip():
                     data[FN["email"]] = email.value.strip()
 
-                # mode-specific fields for POST (if target_url is set)
                 if mode == "functional":
                     data[FN["path_length"]] = str(get_big_len())
                 elif mode == "paths_init_len":
@@ -357,21 +392,72 @@ def launch(
                         "number_paths":  int(get_num_paths_3()),
                     })
 
-                files = {FN["pdb_file"]: (pdb_name, pdb_bytes, "chemical/x-pdb")}
+                files = {"pdb_file": (pdb_name, pdb_bytes, "chemical/x-pdb")}
 
                 if not target_url:
                     print("\n(No target_url set) — preview only payload below:\n")
                     preview = dict(data); preview["attached_file"] = pdb_name
                     print(preview)
-                    return
+                else:
+                    print(f"Submitting to {target_url} …")
+                    r = requests.post(target_url, data=data, files=files, timeout=180)
+                    print("HTTP", r.status_code)
+                    try:
+                        print("JSON:", r.json())
+                    except Exception:
+                        print("Response (≤800 chars):\n", r.text[:800])
 
-                print(f"Submitting to {target_url} …")
-                r = requests.post(target_url, data=data, files=files, timeout=180)
-                print("HTTP", r.status_code)
-                try:
-                    print("JSON:", r.json())
-                except Exception:
-                    print("Response (≤800 chars):\n", r.text[:800])
+                # ---- Optionally run Octave after submit ----
+                if bool(cfg.get("run_octave_after_submit", False)):
+                    SAVE_DIR_REAL = os.path.dirname(save_path)
+                    rp = os.path.join(SAVE_DIR_REAL, "pdbread.m")
+                    # Try to fetch real readpdb.m; fall back to shim
+                    readpdb_url = (cfg.get("readpdb_url") or "").strip()
+                    try:
+                        if readpdb_url:
+                            rb = requests.get(readpdb_url, timeout=30).content
+                            with open(rp, "wb") as f: f.write(rb)
+                            print(f"Fetched readpdb.m from URL to: {rp}")
+                        else:
+                            raise RuntimeError("No readpdb_url set; using shim.")
+                    except Exception as _e:
+                        with open(rp, "w") as f: f.write(PDBREAD_SHIM_TEXT)
+                        print(f"Using built-in pdbread shim at: {rp}")
+
+                    # Write a tiny driver to run your MATLAB/Octave snippet
+                    runner_path = os.path.join(SAVE_DIR_REAL, "run_mcpath.m")
+                    runner = """
+try
+  fid = fopen('mcpath_input.txt','r'); assert(fid>0);
+  a = {}; line = fgetl(fid);
+  while ischar(line), a{end+1,1}=line; line=fgetl(fid); end
+  fclose(fid);
+  % a{2} = pdb filename, a{3} = global chain ID
+  readpdb(a{2}, a{3});
+catch err
+  fiderr = fopen('error','w');
+  if fiderr>0, fprintf(fiderr,'An unexpected error has been occured. Please contact enes.tas@bogazici.edu.tr'); fclose(fiderr); end
+end
+exit
+"""
+                    with open(runner_path, "w") as f:
+                        f.write(runner)
+
+                    # Call Octave in that directory
+                    cd_escaped = SAVE_DIR_REAL.replace("'", "''")
+                    proc = subprocess.run(
+                        ["octave", "-qf", "--eval", f"cd('{cd_escaped}'); run('run_mcpath.m');"],
+                        text=True, capture_output=True
+                    )
+                    # show short logs
+                    if proc.stdout:
+                        print("Octave stdout (tail):\n", proc.stdout[-800:])
+                    if proc.returncode != 0:
+                        print("Octave returned non-zero code:", proc.returncode)
+                        if proc.stderr:
+                            print("Octave stderr (tail):\n", proc.stderr[-800:])
+                    else:
+                        print("Octave finished successfully.")
 
             except Exception as e:
                 print("❌", e)
