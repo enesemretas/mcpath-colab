@@ -395,55 +395,120 @@ def launch(
                 # ---- Run Octave after submit? ----
                 if bool(cfg.get("run_octave_after_submit", False)):
                     SAVE_DIR_REAL = os.path.dirname(save_path)
-                    rp = os.path.join(SAVE_DIR_REAL, "pdbreader.m")
-                    # Try to fetch real pdbreader.m; else fall back to shim
+
+                    # 1) Ensure pdbreader.m exists (parser shim or URL)
+                    rp_parser = os.path.join(SAVE_DIR_REAL, "pdbreader.m")
                     pdbreader_url = (cfg.get("pdbreader_url") or "").strip()
                     try:
                         if pdbreader_url:
                             rb = requests.get(pdbreader_url, timeout=30).content
-                            with open(rp, "wb") as f: f.write(rb)
-                            print(f"Fetched pdbreader.m from URL to: {rp}")
+                            with open(rp_parser, "wb") as f: f.write(rb)
+                            print(f"Fetched pdbreader.m from URL to: {rp_parser}")
                         else:
-                            raise RuntimeError("No pdbreader_url set; using shim.")
+                            # use shim
+                            with open(rp_parser, "w") as f: f.write(PDBREADER_SHIM_TEXT)
+                            print(f"Using built-in pdbreader shim at: {rp_parser}")
                     except Exception as _e:
-                        with open(rp, "w") as f: f.write(PDBREADER_SHIM_TEXT)
-                        print(f"Using built-in pdbreader shim at: {rp}")
+                        with open(rp_parser, "w") as f: f.write(PDBREADER_SHIM_TEXT)
+                        print(f"(Fallback) Using built-in pdbreader shim at: {rp_parser}")
 
-                    # Write a tiny driver to run your MATLAB/Octave snippet
+                    # 2) Ensure readpdb.m exists (MAIN analysis)
+                    rp_readpdb = os.path.join(SAVE_DIR_REAL, "readpdb.m")
+                    have_readpdb = False
+
+                    # Try local repo copy first
+                    try:
+                        local_candidate = "/content/mcpath-colab/matlab/readpdb.m"
+                        if os.path.exists(local_candidate):
+                            with open(local_candidate, "rb") as src, open(rp_readpdb, "wb") as dst:
+                                dst.write(src.read())
+                            have_readpdb = True
+                            print(f"Copied readpdb.m from repo to: {rp_readpdb}")
+                    except Exception:
+                        pass
+
+                    # If not, try downloading from config
+                    if not have_readpdb:
+                        readpdb_url = (cfg.get("readpdb_url") or "").strip()
+                        if readpdb_url:
+                            try:
+                                rb = requests.get(readpdb_url, timeout=30).content
+                                with open(rp_readpdb, "wb") as f: f.write(rb)
+                                have_readpdb = True
+                                print(f"Fetched readpdb.m from URL to: {rp_readpdb}")
+                            except Exception as e:
+                                print("WARN: failed to fetch readpdb.m from readpdb_url:", e)
+
+                    if not have_readpdb:
+                        print("❌ readpdb.m not found. Please either:")
+                        print("   - add it to your repo at mcpath-colab/matlab/readpdb.m, or")
+                        print("   - set readpdb_url in config/defaults.yaml to a raw link of readpdb.m")
+                        return  # stop here; nothing to run
+
+                    # 3) Write runner and add paths
                     runner_path = os.path.join(SAVE_DIR_REAL, "run_mcpath.m")
-                    runner = """
+                    # Optional extra paths from YAML
+                    extra_paths = cfg.get("matlab_paths", []) or []
+                    addpath_lines = ""
+                    for p in extra_paths:
+                        p_esc = p.replace("'", "''")
+                        addpath_lines += f"addpath(genpath('{p_esc}'));\n"
+                    # Always add /content and repo
+                    addpath_lines += "addpath(genpath('/content')); addpath(genpath('/content/mcpath-colab'));\n"
+
+                    runner = f"""
 try
-  fid = fopen('mcpath_input.txt','r'); assert(fid>0);
-  a = {}; line = fgetl(fid);
-  while ischar(line), a{end+1,1}=line; line=fgetl(fid); end
+  % add paths
+  {addpath_lines}
+  % sanity check for readpdb
+  if exist('readpdb','file') ~= 2
+    error('readpdb.m not on path or missing');
+  end
+
+  fid = fopen('mcpath_input.txt','r'); assert(fid>0,'cannot open mcpath_input.txt');
+  a = {{}}; line = fgetl(fid);
+  while ischar(line), a{{end+1,1}} = line; line = fgetl(fid); end
   fclose(fid);
-  % a{2} = pdb filename, a{3} = global chain ID
-  % Your main analysis function still named readpdb:
-  readpdb(a{2}, a{3});
+  % a{{2}} = pdb filename, a{{3}} = global chain ID
+  readpdb(a{{2}}, a{{3}});
 catch err
   fiderr = fopen('error','w');
-  if fiderr>0, fprintf(fiderr,'An unexpected error has been occured. Please contact enes.tas@bogazici.edu.tr'); fclose(fiderr); end
+  if fiderr>0
+    fprintf(fiderr,'ERROR: %s\\n', err.message);
+    fclose(fiderr);
+  end
+  exit(1);  % propagate failure to Python
 end
-exit
+exit(0);
 """
                     with open(runner_path, "w") as f:
                         f.write(runner)
 
-                    # Call Octave in that directory
+                    # 4) Call Octave
                     cd_escaped = SAVE_DIR_REAL.replace("'", "''")
                     proc = subprocess.run(
                         ["octave", "-qf", "--eval", f"cd('{cd_escaped}'); run('run_mcpath.m');"],
                         text=True, capture_output=True
                     )
-                    # short logs
-                    if proc.stdout:
-                        print("Octave stdout (tail):\n", proc.stdout[-800:])
+
                     if proc.returncode != 0:
-                        print("Octave returned non-zero code:", proc.returncode)
+                        print("❌ Octave failed. Return code:", proc.returncode)
+                        if proc.stdout:
+                            print("Octave stdout (tail):\n", proc.stdout[-1000:])
                         if proc.stderr:
-                            print("Octave stderr (tail):\n", proc.stderr[-800:])
+                            print("Octave stderr (tail):\n", proc.stderr[-1000:])
+                        # If an error file exists, show its content
+                        err_file = os.path.join(SAVE_DIR_REAL, "error")
+                        if os.path.exists(err_file):
+                            try:
+                                print("\n--- error file ---")
+                                with open(err_file, "r") as ef:
+                                    print(ef.read()[:2000])
+                            except Exception:
+                                pass
                     else:
-                        print("Octave finished successfully.")
+                        print("✅ Octave finished successfully.")
+
 
             except Exception as e:
                 print("❌", e)
