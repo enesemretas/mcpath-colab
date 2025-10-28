@@ -37,8 +37,10 @@ field_names:
   path_length: "path_length"
   email: "email"
 
-# Run Octave automatically after Submit to execute readpdb
 run_octave_after_submit: true
 
-# If you host your own readpdb.m, put the raw URL here; otherwise shim is used
-readpdb_url: ""
+# If your readpdb.m lives in your repo at this path, the UI will copy it automatically:
+#   /content/mcpath-colab/matlab/readpdb.m
+# Otherwise, give a direct raw URL here:
+readpdb_url: "https://raw.githubusercontent.com/enesemretas/mcpath-colab/main/matlab/readpdb.m"
+
