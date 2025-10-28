@@ -28,6 +28,8 @@ branding:
   logo_url: "https://raw.githubusercontent.com/enesemretas/mcpath-colab/main/assets/mcpath_logo.png"
   logo_height: 96
   logo_align: "center"   # center | left | right
+  
+cfg = yaml.safe_load(requests.get(defaults_url, timeout=15).text)
 
 # Field names if you POST to a server (only used when target_url is set)
 field_names:
