@@ -3,10 +3,10 @@ import os, re, requests, yaml, subprocess
 from IPython.display import display, clear_output
 import ipywidgets as W
 
-# -------------------- Octave pdbread shim (fallback) --------------------
-PDBREAD_SHIM_TEXT = r"""
-function pdb = pdbread(filename)
-  fid = fopen(filename,'r'); assert(fid>0,'pdbread: cannot open %s',filename);
+# -------------------- Octave pdbreader shim (fallback) --------------------
+PDBREADER_SHIM_TEXT = r"""
+function pdb = pdbreader(filename)
+  fid = fopen(filename,'r'); assert(fid>0,'pdbreader: cannot open %s',filename);
   Atoms = struct('AtomSerNo',{},'AtomName',{},'altLoc',{},'resName',{}, ...
                  'chainID',{},'resSeq',{},'X',{},'Y',{},'Z',{},'element',{},'iCode',{});
   k=0;
@@ -38,6 +38,7 @@ function pdb = pdbread(filename)
   pdb.Model  = struct('Atom', Atoms);
 end
 """
+
 
 # -------------------- validators & helpers --------------------
 def _is_valid_pdb_code(c): return bool(re.fullmatch(r"[0-9A-Za-z]{4}", c.strip()))
