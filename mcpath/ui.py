@@ -47,7 +47,8 @@ def _is_valid_email(s):    return (not s.strip()) or bool(re.fullmatch(r"[^@\s]+
 
 def _fetch_rcsb(code: str) -> bytes:
     url = f"https://files.rcsb.org/download/{code.upper()}.pdb"
-    r = requests.get(url, timeout=60); r.raise_for_status()
+    print(f"Fetching PDB from RCSB: {url} (≤15s timeout)")
+    r = requests.get(url, timeout=15); r.raise_for_status()
     return r.content
 
 def _list_or_custom(label: str, options, default_value, minv, maxv, step=1, desc_style=None):
