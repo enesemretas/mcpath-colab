@@ -28,8 +28,6 @@ branding:
   logo_url: "https://raw.githubusercontent.com/enesemretas/mcpath-colab/main/assets/mcpath_logo.png"
   logo_height: 96
   logo_align: "center"   # center | left | right
-  
-cfg = yaml.safe_load(requests.get(defaults_url, timeout=15).text)
 
 # Field names if you POST to a server (only used when target_url is set)
 field_names:
@@ -39,6 +37,7 @@ field_names:
   path_length: "path_length"
   email: "email"
 
+# Runner controls
 run_octave_after_submit: true
 
 # If your readpdb.m lives in your repo at this path, the UI will copy it automatically:
@@ -46,3 +45,10 @@ run_octave_after_submit: true
 # Otherwise, give a direct raw URL here:
 readpdb_url: "https://raw.githubusercontent.com/enesemretas/mcpath-colab/main/matlab/readpdb.m"
 
+# Optional: provide your own pdbreader.m; if omitted, a compatible shim will be used.
+# pdbreader_url: "https://raw.githubusercontent.com/enesemretas/mcpath-colab/main/matlab/pdbreader.m"
+
+# Optional: extra MATLAB/Octave paths to add before running
+matlab_paths:
+  - "/content/mcpath-colab/matlab"
+  - "/content/mcpath-colab/lib"
