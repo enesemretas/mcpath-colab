@@ -411,7 +411,7 @@ def launch(
                 # ---- Optionally run Octave after submit ----
                 if bool(cfg.get("run_octave_after_submit", False)):
                     SAVE_DIR_REAL = os.path.dirname(save_path)
-                    rp = os.path.join(SAVE_DIR_REAL, "pdbread.m")
+                    rp = os.path.join(SAVE_DIR_REAL, "pdbreader.m")
                     # Try to fetch real readpdb.m; fall back to shim
                     readpdb_url = (cfg.get("readpdb_url") or "").strip()
                     try:
@@ -423,7 +423,7 @@ def launch(
                             raise RuntimeError("No readpdb_url set; using shim.")
                     except Exception as _e:
                         with open(rp, "w") as f: f.write(PDBREAD_SHIM_TEXT)
-                        print(f"Using built-in pdbread shim at: {rp}")
+                        print(f"Using built-in pdbreader shim at: {rp}")
 
                     # Write a tiny driver to run your MATLAB/Octave snippet
                     runner_path = os.path.join(SAVE_DIR_REAL, "run_mcpath.m")
