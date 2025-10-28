@@ -15,8 +15,9 @@ def _fetch_rcsb(code: str) -> bytes:
 
 def _list_or_custom(label: str, options, default_value, minv, maxv, step=1):
     """
-    One-at-a-time input using a StackedWidget so List/Custom never show together.
-    Returns: (mode_toggle, stacked_widget, dropdown_widget, int_text_widget, get_value_fn)
+    One-at-a-time input: a small container whose single child is either a Dropdown (List)
+    or a BoundedIntText (Custom). Returns:
+      (mode_toggle, container_box, dropdown_widget, int_text_widget, get_value_fn)
     """
     options = sorted({int(x) for x in options})
     default_value = int(default_value)
@@ -42,16 +43,17 @@ def _list_or_custom(label: str, options, default_value, minv, maxv, step=1):
         layout=common_layout
     )
 
-    stack = W.StackedWidget(children=[dd, txt], selected_index=0)
+    # container holds the active input only
+    container = W.VBox([dd])
 
     def _on_mode(change):
-        stack.selected_index = 0 if change["new"] == "list" else 1
+        container.children = [dd] if change["new"] == "list" else [txt]
     mode.observe(_on_mode, names="value")
 
     def get_value():
         return int(dd.value if mode.value == "list" else txt.value)
 
-    return mode, stack, dd, txt, get_value
+    return mode, container, dd, txt, get_value
 
 def _logo_widget(branding: dict):
     """Create a centered/left/right logo if branding['logo_url'] is set."""
@@ -131,7 +133,7 @@ def launch(
         1000000, 2000000, 3000000, 4000000
     ])
     big_default = int(cfg.get("path_length", big_opts[0] if big_opts else 100000))
-    (pl_mode_big, pl_stack_big, pl_dd_big, pl_txt_big, get_big_len) = _list_or_custom(
+    (pl_mode_big, pl_container_big, pl_dd_big, pl_txt_big, get_big_len) = _list_or_custom(
         label="Path length", options=big_opts, default_value=big_default,
         minv=1, maxv=10_000_000, step=1000
     )
@@ -144,13 +146,13 @@ def launch(
                         placeholder="A", layout=wide)
 
     short_len_opts = [5, 8, 10, 13, 15, 20, 25, 30]
-    (pl_mode_short, pl_stack_short, pl_dd_short, pl_txt_short, get_short_len) = _list_or_custom(
+    (pl_mode_short, pl_container_short, pl_dd_short, pl_txt_short, get_short_len) = _list_or_custom(
         label="Length of Paths", options=short_len_opts, default_value=5,
         minv=1, maxv=10_000, step=1
     )
 
     num_paths_opts_mode2 = [1000, 2000, 3000, 5000, 10000, 20000, 30000, 40000, 50000]
-    (np_mode_2, np_stack_2, np_dd_2, np_txt_2, get_num_paths_2) = _list_or_custom(
+    (np_mode_2, np_container_2, np_dd_2, np_txt_2, get_num_paths_2) = _list_or_custom(
         label="Number of Paths", options=num_paths_opts_mode2, default_value=1000,
         minv=1, maxv=10_000_000, step=100
     )
@@ -163,7 +165,7 @@ def launch(
                          placeholder="B", layout=wide)
 
     num_paths_opts_mode3 = [1000, 2000, 3000, 5000, 10000, 30000, 50000]
-    (np_mode_3, np_stack_3, np_dd_3, np_txt_3, get_num_paths_3) = _list_or_custom(
+    (np_mode_3, np_container_3, np_dd_3, np_txt_3, get_num_paths_3) = _list_or_custom(
         label="Number of Paths", options=num_paths_opts_mode3, default_value=1000,
         minv=1, maxv=10_000_000, step=100
     )
@@ -178,16 +180,16 @@ def launch(
                      layout=W.Layout(align_items="center", justify_content="flex-start",
                                      flex_flow="row wrap", gap="10px"))
 
-    functional_box = W.VBox([pl_mode_big, pl_stack_big])
+    functional_box = W.VBox([pl_mode_big, pl_container_big])
     mode2_box = W.VBox([
         init_idx, init_chain,
-        pl_mode_short, pl_stack_short,
-        np_mode_2,   np_stack_2
+        pl_mode_short, pl_container_short,
+        np_mode_2,   np_container_2
     ])
     mode3_box = W.VBox([
         init_idx, init_chain,
         final_idx, final_chain,
-        np_mode_3,  np_stack_3
+        np_mode_3,  np_container_3
     ])
 
     def _sync_mode(*_):
@@ -229,7 +231,7 @@ def launch(
         chain_id.value = ""
         email.value = ""
         pred_type.value = "functional"
-        # reset to List for all stacks
+        # reset to List modes
         pl_mode_big.value = "list"
         pl_mode_short.value = "list"
         np_mode_2.value = "list"
@@ -351,14 +353,11 @@ def launch(
                 files = {FN["pdb_file"]: (pdb_name, pdb_bytes, "chemical/x-pdb")}
 
                 if not target_url:
-                    # preview only
                     print("\n(No target_url set) — preview only payload below:\n")
-                    preview = dict(data)
-                    preview["attached_file"] = pdb_name
+                    preview = dict(data); preview["attached_file"] = pdb_name
                     print(preview)
                     return
 
-                # real POST
                 print(f"Submitting to {target_url} …")
                 r = requests.post(target_url, data=data, files=files, timeout=180)
                 print("HTTP", r.status_code)
