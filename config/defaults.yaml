@@ -1,22 +1,15 @@
-# config/defaults.yaml
-pdb_code: 6OIK
-chain_id: A
-path_length: 100000        # default selection (can be any integer)
-email: ""
-
-# leave empty to preview only; set to your real endpoint to POST
+# Where to POST form data (leave empty to just preview)
 target_url: ""
 
-# map your server’s expected field names
-field_names:
-  pdb_code: pdbcode
-  pdb_file: pdbfile
-  chain_id: chainid
-  path_length: path_length
-  email: email
-  save_dir: "/content/mcpath_uploads"
+# Where to save the uploaded/fetched PDB and mcpath_input.txt in Colab
+save_dir: "/content"
 
-# NEW: values shown in the List mode of the path-length selector
+# Form defaults (optional)
+pdb_code: ""
+chain_id: "A"
+email: ""
+
+# Dropdown options for Functional Residues mode (large path lengths)
 path_length_options:
   - 100000
   - 200000
@@ -28,8 +21,24 @@ path_length_options:
   - 2000000
   - 3000000
   - 4000000
+path_length: 100000
 
+# UI branding (optional)
 branding:
   logo_url: "https://raw.githubusercontent.com/enesemretas/mcpath-colab/main/assets/mcpath_logo.png"
-  logo_height: 96     # px
-  logo_align: "left"  # "center", "left", or "right"
+  logo_height: 96
+  logo_align: "center"   # center | left | right
+
+# Field names if you POST to a server (only used when target_url is set)
+field_names:
+  pdb_file: "pdb_file"
+  pdb_code: "pdb_code"
+  chain_id: "chain_id"
+  path_length: "path_length"
+  email: "email"
+
+# Run Octave automatically after Submit to execute readpdb
+run_octave_after_submit: true
+
+# If you host your own readpdb.m, put the raw URL here; otherwise shim is used
+readpdb_url: ""
