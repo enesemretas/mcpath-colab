@@ -1,8 +1,9 @@
-import os, re, requests, yaml, io, importlib
+# mcpath/ui.py
+import os, re, requests, yaml, importlib
 from IPython.display import display, clear_output
 import ipywidgets as W
 
-# Try Colab uploader (used as a fallback when FileUpload misbehaves)
+# Prefer Colab's picker; fall back gracefully
 try:
     from google.colab import files as colab_files
     _HAS_COLAB = True
@@ -20,7 +21,6 @@ def _fetch_rcsb(code: str) -> bytes:
     return r.content
 
 def _list_or_custom(label: str, options, default_value, minv, maxv, step=1):
-    """Factory for a (List|Custom) toggle + Dropdown + BoundedIntText trio."""
     options = sorted({int(x) for x in options})
     default_value = int(default_value)
     if default_value not in options:
@@ -46,7 +46,6 @@ def _list_or_custom(label: str, options, default_value, minv, maxv, step=1):
     return mode, dd, txt, get_value
 
 def _logo_widget(branding: dict):
-    """Create a centered/left/right logo if branding['logo_url'] is set."""
     url = (branding.get("logo_url") or "").strip()
     if not url:
         return None
@@ -56,8 +55,7 @@ def _logo_widget(branding: dict):
         img_bytes = requests.get(url, timeout=20).content
         img = W.Image(value=img_bytes, format="png", layout=W.Layout(height=f"{height}px"))
         jc = {"center":"center", "left":"flex-start", "right":"flex-end"}.get(align, "center")
-        box = W.HBox([img], layout=W.Layout(justify_content=jc))
-        return box
+        return W.HBox([img], layout=W.Layout(justify_content=jc))
     except Exception:
         return None
 
@@ -66,58 +64,41 @@ def launch(
     defaults_url="https://raw.githubusercontent.com/enesemretas/mcpath-colab/main/config/defaults.yaml",
     show_title="MCPath (Python readpdb)"
 ):
-    """Launch the MCPath parameter form (UI + Python readpdb integration)."""
     cfg = yaml.safe_load(requests.get(defaults_url, timeout=30).text)
     target_url = cfg.get("target_url", "").strip()
     FN = cfg["field_names"]
-    run_python_readpdb = bool(cfg.get("run_python_readpdb_after_submit", True))  # default True
+    run_python_readpdb = bool(cfg.get("run_python_readpdb_after_submit", True))
 
-    # ---------- Branding / logo ----------
+    # ---------- Branding ----------
     logo = _logo_widget(cfg.get("branding", {}))
 
-    # ---------- PDB: code OR upload ----------
+    # ---------- PDB: code OR single-button upload ----------
     pdb_code   = W.Text(value=str(cfg.get("pdb_code", "")), description="PDB code:")
     or_lbl     = W.HTML("<b>&nbsp;&nbsp;or&nbsp;&nbsp;</b>")
-    pdb_upload = W.FileUpload(accept=".pdb", multiple=False, description="Choose file (1)")
+    btn_pick   = W.Button(description="Choose file", icon="upload")
     file_lbl   = W.Label("No file chosen")
 
-    # Fallback uploader (Colab’s native dialog)
-    btn_colab  = W.Button(description="Upload (Colab)", tooltip="Use Colab’s native file picker if the widget fails")
-    manual_upload_store = {"name": None, "bytes": None}  # filled by Colab upload
+    # Store chosen file (name, bytes)
+    picked = {"name": None, "bytes": None}
 
-    def _on_upload_change(change):
-        if pdb_upload.value:
-            fname = next(iter(pdb_upload.value.keys()))
-            file_lbl.value = fname + " (widget)"
-            # If we already had a manual file, clear it to avoid ambiguity
-            manual_upload_store["name"] = None
-            manual_upload_store["bytes"] = None
-        else:
-            if manual_upload_store["name"]:
-                file_lbl.value = manual_upload_store["name"] + " (colab)"
-            else:
-                file_lbl.value = "No file chosen"
-
-    def _on_colab_upload(_):
+    def _on_pick(_):
         if not _HAS_COLAB:
-            file_lbl.value = "Colab uploader not available in this environment."
+            file_lbl.value = "Colab picker not available in this environment."
             return
         try:
-            picked = colab_files.upload()  # opens the browser dialog
-            if not picked:
+            result = colab_files.upload()
+            if not result:
                 return
-            # pick the first file
-            fname, data = next(iter(picked.items()))
-            manual_upload_store["name"]  = fname
-            manual_upload_store["bytes"] = data
-            file_lbl.value = f"{fname} (colab)"
+            name, data = next(iter(result.items()))
+            picked["name"]  = name
+            picked["bytes"] = data
+            file_lbl.value  = f"{name}"
         except Exception as e:
-            file_lbl.value = f"Colab upload failed: {e}"
+            file_lbl.value = f"Upload failed: {e}"
 
-    pdb_upload.observe(_on_upload_change, names="value")
-    btn_colab.on_click(_on_colab_upload)
+    btn_pick.on_click(_on_pick)
 
-    # ---------- Always-present fields ----------
+    # ---------- Always fields ----------
     chain_id   = W.Text(value=str(cfg.get("chain_id", "A")), description="Chain ID:")
     email      = W.Text(value=str(cfg.get("email", "")), description="Email (opt):")
 
@@ -133,7 +114,7 @@ def launch(
         layout=W.Layout(width="auto")
     )
 
-    # ---------- Functional mode: big path_length (YAML-driven List/Custom) ----------
+    # ---------- Functional mode ----------
     big_opts = cfg.get("path_length_options", [
         100000, 200000, 300000, 400000, 500000, 750000,
         1000000, 2000000, 3000000, 4000000
@@ -147,7 +128,6 @@ def launch(
     # ---------- Mode 2 ----------
     init_idx   = W.BoundedIntText(value=1, min=1, max=1_000_000, step=1, description="Index of initial residue")
     init_chain = W.Text(value="", description="Chain of initial residue", placeholder="A", layout=W.Layout(width="260px"))
-
     short_len_opts = [5, 8, 10, 13, 15, 20, 25, 30]
     (pl_mode_short, pl_dd_short, pl_txt_short, get_short_len) = _list_or_custom(
         label="Length of Paths:", options=short_len_opts, default_value=5,
@@ -168,25 +148,16 @@ def launch(
         minv=1, maxv=10_000_000, step=100
     )
 
-    # ---------- Actions & output ----------
+    # ---------- Actions ----------
     btn_submit = W.Button(description="Submit", button_style="success", icon="paper-plane")
     btn_clear  = W.Button(description="Clear",  button_style="warning", icon="trash")
     out        = W.Output()
 
-    # ---------- Grouped layouts ----------
-    # Upload row: widget + Colab fallback + filename label
-    pdb_row = W.HBox([pdb_code, W.HTML("&nbsp;"), or_lbl, pdb_upload, btn_colab, file_lbl])
-
+    # ---------- Layout ----------
+    pdb_row = W.HBox([pdb_code, W.HTML("&nbsp;"), or_lbl, btn_pick, file_lbl])
     functional_box = W.VBox([pl_mode_big, pl_dd_big, pl_txt_big])
-    mode2_box = W.VBox([
-        init_idx, init_chain,
-        pl_mode_short, pl_dd_short, pl_txt_short,
-        np_mode_2, np_dd_2, np_txt_2
-    ])
-    mode3_box = W.VBox([
-        init_idx, init_chain, final_idx, final_chain,
-        np_mode_3, np_dd_3, np_txt_3
-    ])
+    mode2_box = W.VBox([init_idx, init_chain, pl_mode_short, pl_dd_short, pl_txt_short, np_mode_2, np_dd_2, np_txt_2])
+    mode3_box = W.VBox([init_idx, init_chain, final_idx, final_chain, np_mode_3, np_dd_3, np_txt_3])
 
     def _sync_mode(*_):
         functional_box.layout.display = ""
@@ -199,7 +170,6 @@ def launch(
     _sync_mode()
     pred_type.observe(_sync_mode, names="value")
 
-    # ---------- Render ----------
     children = []
     if logo: children.append(logo)
     children += [
@@ -215,21 +185,10 @@ def launch(
     display(W.VBox(children))
 
     # -------------------- handlers --------------------
-    def _new_uploader():
-        """Colab/ipywidgets workaround: FileUpload.value is read-only; recreate the widget."""
-        nonlocal pdb_upload
-        new = W.FileUpload(accept=".pdb", multiple=False, description="Choose file (1)")
-        new.observe(_on_upload_change, names="value")
-        idx = pdb_row.children.index(pdb_upload)
-        pdb_row.children = tuple(list(pdb_row.children[:idx]) + [new] + list(pdb_row.children[idx+1:]))
-        pdb_upload = new
-
     def on_clear(_):
         pdb_code.value = ""
-        _new_uploader()
+        picked["name"] = None; picked["bytes"] = None
         file_lbl.value = "No file chosen"
-        manual_upload_store["name"] = None
-        manual_upload_store["bytes"] = None
         chain_id.value = str(cfg.get("chain_id","A"))
         email.value = ""
         pred_type.value = "functional"
@@ -242,16 +201,8 @@ def launch(
         with out: clear_output()
 
     def _collect_pdb_bytes():
-        # 1) Prefer the widget if it actually has bytes
-        if pdb_upload.value:
-            (fname, meta) = next(iter(pdb_upload.value.items()))
-            content = meta.get("content", None)
-            if content:
-                return content, fname
-        # 2) Fallback to the Colab uploader result
-        if manual_upload_store["bytes"] is not None:
-            return manual_upload_store["bytes"], manual_upload_store["name"]
-        # 3) Otherwise expect a PDB code for RCSB
+        if picked["bytes"] is not None:
+            return picked["bytes"], picked["name"]
         code = pdb_code.value.strip()
         if not _is_valid_pdb_code(code):
             raise ValueError("PDB code must be exactly 4 alphanumeric characters (or upload a file).")
@@ -260,15 +211,13 @@ def launch(
     def _run_python_readpdb(saved_path: str, chain: str):
         try:
             from mcpath import readpdb_strict as rps
-            importlib.reload(rps)  # helpful while iterating in Colab
+            importlib.reload(rps)
         except Exception as e:
             print("ℹ️ readpdb_strict could not be imported:", e)
             return None
-
         if not hasattr(rps, "run") or not callable(rps.run):
             print("ℹ️ readpdb_strict has no callable (run); skipping.")
             return None
-
         try:
             out_path = rps.run(saved_path, chain, strict_matlab_mode=True)
             return out_path
@@ -287,20 +236,16 @@ def launch(
                     raise ValueError("Invalid email format.")
 
                 pdb_bytes, pdb_name = _collect_pdb_bytes()
-
-                # Save PDB next to notebook cwd
                 save_path = os.path.join(os.getcwd(), pdb_name)
                 with open(save_path, "wb") as f:
                     f.write(pdb_bytes)
                 print(f"Saved local copy: {save_path}")
 
-                # ---- Run Python readpdb (makes <pdb>.cor) ----
                 cor_path = None
                 if run_python_readpdb:
                     cor_path = _run_python_readpdb(save_path, chain_global)
                     if cor_path and os.path.exists(cor_path):
                         print(f"✅ Created: {cor_path}")
-                        # show a short preview
                         try:
                             with open(cor_path, "r") as cf:
                                 head = "".join([next(cf) for _ in range(5)])
@@ -308,16 +253,11 @@ def launch(
                         except Exception:
                             pass
 
-                # ---- Build payload (for your server, optional) ----
-                data = {
-                    "prediction_mode": pred_type.value,
-                    FN["chain_id"]: chain_global,
-                }
+                data = {"prediction_mode": pred_type.value, FN["chain_id"]: chain_global}
                 if pdb_code.value.strip():
                     data[FN["pdb_code"]] = pdb_code.value.strip().upper()
                 if email.value.strip():
                     data[FN["email"]] = email.value.strip()
-
                 files = {FN["pdb_file"]: (pdb_name, pdb_bytes, "chemical/x-pdb")}
 
                 if pred_type.value == "functional":
@@ -345,13 +285,11 @@ def launch(
                     })
 
                 if not target_url:
-                    # preview only
                     print("\n(No target_url set) — preview only payload below:\n")
                     preview = dict(data); preview["attached_file"] = pdb_name
                     print(preview)
                     return
 
-                # real POST (if you enable target_url in YAML)
                 print(f"Submitting to {target_url} …")
                 r = requests.post(target_url, data=data, files=files, timeout=180)
                 print("HTTP", r.status_code)
@@ -359,7 +297,6 @@ def launch(
                     print("JSON:", r.json())
                 except Exception:
                     print("Response (≤800 chars):\n", r.text[:800])
-
             except Exception as e:
                 print("❌", e)
 
