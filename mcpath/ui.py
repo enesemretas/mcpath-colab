@@ -1,130 +1,11 @@
 # mcpath/ui.py
-import os, re, requests, yaml, subprocess, shutil, sys
+import os, re, requests, shutil
 from IPython.display import display, clear_output
 import ipywidgets as W
+import numpy as np
+import yaml
 
-# -------------------- Octave availability helper --------------------
-def _ensure_octave_and_pick_cmd(install_timeout=300):
-    """
-    Return a usable Octave executable.
-    Resolution order:
-      1) $OCTAVE_CMD env var
-      2) PATH: octave, then octave-cli
-      3) Common platform paths (Windows/macOS/Linux)
-      4) Colab auto-install (apt-get) when running under /content
-    Raises FileNotFoundError if nothing is found/installed.
-    """
-    import platform
-
-    # 1) Allow explicit override
-    override = os.environ.get("OCTAVE_CMD", "").strip()
-    if override and shutil.which(override):
-        return shutil.which(override)
-
-    # 2) PATH lookup
-    cand = shutil.which("octave") or shutil.which("octave-cli") or shutil.which("octave-cli.exe")
-    if cand:
-        return cand
-
-    # 3) Common install locations by OS
-    sysname = platform.system().lower()
-    candidates = []
-
-    if sysname == "windows":
-        candidates += [
-            r"C:\Octave\Octave-9.1.0\mingw64\bin\octave-cli.exe",
-            r"C:\Octave\Octave-8.4.0\mingw64\bin\octave-cli.exe",
-            r"C:\Program Files\GNU Octave\Octave-9.1.0\mingw64\bin\octave-cli.exe",
-            r"C:\Program Files\GNU Octave\Octave-8.4.0\mingw64\bin\octave-cli.exe",
-        ]
-    elif sysname == "darwin":
-        # Homebrew and app bundle CLI shims
-        candidates += [
-            "/opt/homebrew/bin/octave",        # Apple Silicon
-            "/usr/local/bin/octave",           # Intel mac
-            "/Applications/Octave.app/Contents/Resources/usr/bin/octave-cli",
-        ]
-    else:
-        # Linux typical paths (including conda)
-        candidates += [
-            "/usr/bin/octave", "/usr/local/bin/octave",
-            "/usr/bin/octave-cli", "/usr/local/bin/octave-cli",
-            # conda-forge (common prefixes)
-            os.path.expanduser("~/.conda/envs/base/bin/octave"),
-            os.path.expanduser("~/.mambaforge/bin/octave"),
-            os.path.expanduser("~/.miniforge3/bin/octave"),
-        ]
-
-    for p in candidates:
-        if os.path.exists(p):
-            return p
-
-    # 4) Best-effort auto-install on Colab only
-    in_colab = os.path.isdir("/content") and os.path.exists("/usr/bin/apt-get")
-    if in_colab:
-        try:
-            print("⚙️ Octave not found — installing via apt-get (this may take a couple of minutes)…")
-            subprocess.run(["apt-get", "update", "-qq"], check=True, text=True)
-            subprocess.run(
-                ["apt-get", "install", "-y", "-qq", "octave", "gnuplot"],
-                check=True, text=True, timeout=install_timeout
-            )
-            cand = shutil.which("octave") or shutil.which("octave-cli")
-            if cand:
-                print("✅ Octave installed:", cand)
-                return cand
-        except Exception as e:
-            print("❌ Failed to auto-install Octave on Colab:", e)
-
-    # Nothing worked
-    raise FileNotFoundError(
-        "Octave executable not found.\n"
-        "Install it and/or set OCTAVE_CMD to the full path.\n"
-        "Quick install tips:\n"
-        "  • Ubuntu/Debian:   sudo apt-get update && sudo apt-get install -y octave gnuplot\n"
-        "  • macOS (Homebrew): brew install octave\n"
-        "  • Windows (winget): winget install -e --id GNU.Octave   (or: choco install octave)\n"
-        "  • Conda/Mamba:     conda install -c conda-forge octave gnuplot"
-    )
-
-# -------------------- Octave pdbreader shim (fallback) --------------------
-# Only used if you don't supply a real pdbreader.m via cfg['pdbreader_url'].
-PDBREADER_SHIM_TEXT = r"""
-function pdb = pdbreader(filename)
-  fid = fopen(filename,'r'); assert(fid>0,'pdbreader: cannot open %s',filename);
-  Atoms = struct('AtomSerNo',{},'AtomName',{},'altLoc',{},'resName',{}, ...
-                 'chainID',{},'resSeq',{},'X',{},'Y',{},'Z',{},'element',{},'iCode',{});
-  k=0;
-  while true
-    t=fgetl(fid); if ~ischar(t), break; end
-    if length(t)>=54 && (strncmp(t,'ATOM  ',6) || strncmp(t,'HETATM',6))
-      k=k+1; s=@(a,b) strtrim(t(a:min(b,length(t))));
-      Atoms(k).AtomSerNo=str2double(s(7,11));
-      Atoms(k).AtomName =s(13,16);
-      Atoms(k).altLoc   =s(17,17);
-      Atoms(k).resName  =s(18,20);
-      Atoms(k).chainID  =s(22,22);
-      Atoms(k).resSeq   =str2double(s(23,26));
-      Atoms(k).iCode    =s(27,27);
-      Atoms(k).X        =str2double(s(31,38));
-      Atoms(k).Y        =str2double(s(39,46));
-      Atoms(k).Z        =str2double(s(47,54));
-      if length(t)>=78
-        elem=s(77,78);
-      else
-        nm=regexprep(Atoms(k).AtomName,'[^A-Za-z]',''); elem='';
-        if ~isempty(nm), elem=nm(1); end
-      end
-      Atoms(k).element = elem;
-    end
-  end
-  fclose(fid);
-  pdb.Header = struct();
-  pdb.Model  = struct('Atom', Atoms);
-end
-"""
-
-# -------------------- validators & helpers --------------------
+# -------------------- validators --------------------
 def _is_valid_pdb_code(c): return bool(re.fullmatch(r"[0-9A-Za-z]{4}", c.strip()))
 def _is_valid_chain(ch):   return bool(re.fullmatch(r"[A-Za-z0-9]", ch.strip()))
 def _is_valid_email(s):    return (not s.strip()) or bool(re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", s.strip()))
@@ -136,10 +17,6 @@ def _fetch_rcsb(code: str) -> bytes:
     return r.content
 
 def _list_or_custom(label: str, options, default_value, minv, maxv, step=1, desc_style=None):
-    """
-    Switchable input: either a Dropdown (List) or a BoundedIntText (Custom).
-    Returns (mode_toggle, container_box, dropdown_widget, int_text_widget, get_value_fn).
-    """
     options = sorted({int(x) for x in options})
     default_value = int(default_value)
     if default_value not in options:
@@ -187,25 +64,227 @@ def _logo_widget(branding: dict):
     except Exception:
         return None
 
+# -------------------- Python port of readpdb.m --------------------
+AA_CODE = {
+    "GLY": 1, "ALA": 2, "VAL": 3, "ILE": 4, "LEU": 5,
+    "SER": 6, "THR": 7, "ASP": 8, "ASN": 9, "GLU":10,
+    "GLN":11, "LYS":12, "ARG":13, "CYS":14, "MET":15,
+    "PHE":16, "TYR":17, "TRP":18, "HIS":19, "PRO":20
+}
+AA_CONST = {
+    1:  75.0,  2:  89.1,  3: 117.2,  4: 131.2,  5: 131.2,
+    6: 105.1,  7: 119.1,  8: 133.1,  9: 132.1, 10: 147.1,
+   11: 146.0, 12: 146.2, 13: 174.2, 14: 121.2, 15: 149.2,
+   16: 165.2, 17: 181.2, 18: 204.2, 19: 155.2, 20: 115.1,
+}
+AA_MIN_ATOMS = {
+    1:  2,  2:  5,  3:  7,  4:  8,  5:  8,
+    6:  6,  7:  6,  8:  8,  9:  8, 10:  9,
+   11:  9, 12:  9, 13: 11, 14:  6, 15:  7,
+   16: 11, 17: 12, 18: 14, 19: 10, 20:  7,
+}
+BACKBONE = {"N", "CA", "C", "O", "OXT"}
+ALTNAME_NORMALIZE = {
+    "HIP":"HIS", "HIE":"HIS", "HID":"HIS", "HSD":"HIS", "HSE":"HIS", "HSP":"HIS",
+    "LYN":"LYS", "GLH":"GLU", "CYM":"CYS", "CYX":"CYS", "ASH":"ASN", "TYM":"TYR"
+}
+
+def _trim_to_first_model(pdb_lines):
+    has_model = any(l.startswith("MODEL") for l in pdb_lines)
+    if not has_model: return pdb_lines
+    new_lines = []; in_model = False
+    for L in pdb_lines:
+        if L.startswith("MODEL"):
+            if in_model: break
+            in_model = True
+            continue
+        if L.startswith("ENDMDL") and in_model: break
+        if not in_model:
+            if L.startswith("ATOM") or L.startswith("HETATM") or L.startswith("TER"):
+                new_lines.append(L)
+        else:
+            new_lines.append(L)
+    return new_lines
+
+def _safe_sub(s, a, b):
+    a = max(1, a); b = min(len(s), b)
+    return s[a-1:b] if a <= b else ""
+
+def _parse_atoms_from_path(pdb_path):
+    with open(pdb_path, "r", encoding="utf-8", errors="ignore") as f:
+        lines = f.read().splitlines()
+    lines = _trim_to_first_model(lines)
+    atoms = []
+    for L in lines:
+        if not (L.startswith("ATOM") or L.startswith("HETATM")): continue
+        if len(L) < 54: continue
+        try:
+            AtomSerNo = int(_safe_sub(L,7,11).strip() or "0")
+            AtomName  = _safe_sub(L,13,16).strip()
+            altLoc    = _safe_sub(L,17,17).strip()
+            resName   = _safe_sub(L,18,20).strip()
+            chainID   = _safe_sub(L,22,22).strip()
+            resSeq    = int(_safe_sub(L,23,26).strip() or "0")
+            iCode     = _safe_sub(L,27,27).strip()
+            X         = float(_safe_sub(L,31,38))
+            Y         = float(_safe_sub(L,39,46))
+            Z         = float(_safe_sub(L,47,54))
+            element   = _safe_sub(L,77,78).strip()
+        except: 
+            continue
+        atoms.append({
+            "AtomSerNo": AtomSerNo, "AtomName": AtomName, "altLoc": altLoc,
+            "resName": resName, "chainID": chainID, "resSeq": resSeq,
+            "iCode": iCode, "X": X, "Y": Y, "Z": Z, "element": element
+        })
+    return atoms
+
+def _normalize_resname(nm): 
+    u = (nm or "").upper(); 
+    return ALTNAME_NORMALIZE.get(u, u)
+
+def _is_hydrogen(atom):
+    el = (atom["element"] or "").upper()
+    nm = (atom["AtomName"] or "").upper()
+    if el == "H" or nm == "H": return True
+    if nm.startswith("H"): return True
+    return False
+
+def _chain_rank_map(atoms):
+    ranks = {}; r = 0; last = None
+    for a in atoms:
+        ch = (a["chainID"] or "").upper()
+        if ch != last:
+            if ch not in ranks:
+                r += 1; ranks[ch] = r
+            last = ch
+    return ranks
+
+def _sidechain_coord(resname, atom_group):
+    rn = (resname or "").upper()
+    ca = next((a for a in atom_group if (a["AtomName"] or "").upper() == "CA"), None)
+    if rn == "GLY":
+        return (ca["X"], ca["Y"], ca["Z"]) if ca else (np.nan, np.nan, np.nan)
+    cb = next((a for a in atom_group if (a["AtomName"] or "").upper() == "CB"), None)
+    if cb is not None:
+        return (cb["X"], cb["Y"], cb["Z"])
+    pts = [(a["X"], a["Y"], a["Z"]) for a in atom_group
+           if (a["AtomName"] or "").upper() not in BACKBONE and not _is_hydrogen(a)]
+    if pts:
+        arr = np.array(pts, dtype=float)
+        c = arr.mean(axis=0)
+        return (float(c[0]), float(c[1]), float(c[2]))
+    return (ca["X"], ca["Y"], ca["Z"]) if ca else (np.nan, np.nan, np.nan)
+
+def readpdb_py(pdb_path: str, chainID: str | None):
+    """
+    Python port of your readpdb.m:
+    - Writes "<pdb_path>.cor"
+    - If residues fail atom-count thresholds, writes "problem".
+    """
+    chainID = (chainID or "").strip()[:1].upper()
+    atoms_all = _parse_atoms_from_path(pdb_path)
+
+    # Normalize names, drop hydrogens, handle altLoc (keep first seen per chain/res/atom)
+    cleaned = []
+    seen_alt = set()
+    for a in atoms_all:
+        if _is_hydrogen(a): 
+            continue
+        a["resName"] = _normalize_resname(a["resName"])
+        a["chainID"] = (a["chainID"] or "").upper()
+        key = (a["chainID"], a["resSeq"], (a["AtomName"] or "").upper())
+        if a["altLoc"]:
+            if key in seen_alt: 
+                continue
+            seen_alt.add(key)
+        cleaned.append(a)
+
+    ranks_full = _chain_rank_map(cleaned)
+    if chainID and chainID not in ranks_full:
+        print(f'WARNING: requested chain "{chainID}" not found. No chain filter applied.')
+        chosen = cleaned
+        ranks = ranks_full
+    else:
+        chosen = [a for a in cleaned if (not chainID) or a["chainID"] == chainID]
+        ranks = ranks_full
+
+    # Group by (chain,resSeq) in file order
+    groups = []
+    last = None
+    for a in chosen:
+        key = (a["chainID"], a["resSeq"])
+        if key != last:
+            groups.append([a["chainID"], a["resSeq"], [a]])
+            last = key
+        else:
+            groups[-1][2].append(a)
+
+    # Build rows for standard AAs with CA
+    result_rows = []
+    problems = []
+    for ch, resi, grp in groups:
+        rn = grp[0]["resName"]
+        if rn not in AA_CODE: 
+            continue
+        ca = next((a for a in grp if (a["AtomName"] or "").upper() == "CA"), None)
+        if ca is None:
+            continue
+        aa_code = AA_CODE[rn]
+        chain_rank = ranks.get(ch, 0)
+        res_atom_count = sum(1 for a in grp if not _is_hydrogen(a))
+        scx, scy, scz = _sidechain_coord(rn, grp)
+        const = AA_CONST[aa_code]
+        result_rows.append([
+            float(resi), float(aa_code),
+            float(ca["X"]), float(ca["Y"]), float(ca["Z"]),
+            float(scx), float(scy), float(scz),
+            float(res_atom_count), float(chain_rank), float(const)
+        ])
+        if res_atom_count <= AA_MIN_ATOMS.get(aa_code, 0):
+            problems.append((resi, chain_rank))
+
+    # Write "<ProteinName>.cor"
+    cor_path = f"{pdb_path}.cor"
+    with open(cor_path, "w", encoding="utf-8") as f:
+        for r in result_rows:
+            f.write(f"{r[0]:5.0f} {r[1]:4.0f} {r[2]:8.3f} {r[3]:8.3f} {r[4]:8.3f} "
+                    f"{r[5]:8.3f} {r[6]:8.3f} {r[7]:8.3f} {r[8]:4.0f} {r[9]:2.0f} {r[10]:4.1f}\n")
+    if problems:
+        with open("problem", "w", encoding="utf-8") as f:
+            f.write("There are problems about number of atoms on following residues\n")
+            for resseq, crank in problems:
+                f.write(f"{int(resseq)} of {int(crank)} chain\n")
+    return cor_path, len(result_rows), len(problems)
+
+def _copy_to_free_name(src: str, dst_base: str) -> str | None:
+    """Copy src -> dst_base (or dst_base.N) without overwrite. Return final path or None."""
+    if not os.path.isfile(src):
+        return None
+    dst = dst_base
+    k = 1
+    while os.path.exists(dst):
+        dst = f"{dst_base}.{k}"
+        k += 1
+    shutil.copy2(src, dst)
+    return dst
+
 # -------------------- main UI --------------------
 def launch(
     defaults_url="https://raw.githubusercontent.com/enesemretas/mcpath-colab/main/config/defaults.yaml",
     show_title="MCPath-style Parameters"
 ):
-    """Launch the MCPath parameter form."""
+    """Launch the MCPath parameter form (Python backend only: readpdb)."""
     cfg = yaml.safe_load(requests.get(defaults_url, timeout=15).text)
-    target_url = cfg.get("target_url", "").strip()
     FN = cfg["field_names"]
-
     SAVE_DIR = cfg.get("save_dir", "/content")
     os.makedirs(SAVE_DIR, exist_ok=True)
 
-    # Branding / labels
     logo = _logo_widget(cfg.get("branding", {}))
     DESC = {'description_width': '260px'}
     wide = W.Layout(width="460px", min_width="420px")
 
-    # ---------- PDB: code OR upload ----------
+    # --- PDB: code OR upload ---
     pdb_code   = W.Text(value=str(cfg.get("pdb_code", "")),
                         description="PDB code:",
                         layout=wide, style=DESC)
@@ -220,7 +299,7 @@ def launch(
             file_lbl.value = "No file chosen"
     pdb_upload.observe(_on_upload_change, names="value")
 
-    # ---------- Always-present fields ----------
+    # --- Always-present fields ---
     chain_id   = W.Text(value=str(cfg.get("chain_id", "")),
                         description="Chain ID:",
                         layout=wide, style=DESC)
@@ -228,12 +307,10 @@ def launch(
                         description="Email (opt):",
                         layout=wide, style=DESC)
 
-    # ---------- Prediction type ----------
+    # --- (Keep radio but only 'functional' used here) ---
     pred_type = W.RadioButtons(
         options=[
-            ("Functional Residues", "functional"),
-            ("Allosteric Paths (initial residue + path length)", "paths_init_len"),
-            ("Allosteric Paths (initial & final residues)", "paths_init_final"),
+            ("Functional Residues (readpdb only)", "functional"),
         ],
         value="functional",
         description="Prediction:",
@@ -241,85 +318,24 @@ def launch(
         style=DESC
     )
 
-    # ---------- Functional mode: large path length ----------
-    big_opts = cfg.get("path_length_options", [
-        100000, 200000, 300000, 400000, 500000, 750000,
-        1000000, 2000000, 3000000, 4000000
-    ])
+    # Big path length widget (kept for compatibility; not used by Python reader)
+    big_opts = cfg.get("path_length_options", [100000, 200000, 300000, 400000, 500000])
     big_default = int(cfg.get("path_length", big_opts[0] if big_opts else 100000))
     (pl_mode_big, pl_container_big, pl_dd_big, pl_txt_big, get_big_len) = _list_or_custom(
         label="Path length", options=big_opts, default_value=big_default,
         minv=1, maxv=10_000_000, step=1000, desc_style=DESC
     )
+    functional_box = W.VBox([pl_mode_big, pl_container_big])
 
-    # ---------- Mode 2: initial residue + short path length + number of paths ----------
-    init_idx   = W.BoundedIntText(value=1, min=1, max=1_000_000, step=1,
-                                  description="Index of initial residue:",
-                                  layout=wide, style=DESC)
-    init_chain = W.Text(value="", description="Chain of initial residue:",
-                        placeholder="A", layout=wide, style=DESC)
-
-    short_len_opts = [5, 8, 10, 13, 15, 20, 25, 30]
-    (pl_mode_short, pl_container_short, pl_dd_short, pl_txt_short, get_short_len) = _list_or_custom(
-        label="Length of Paths", options=short_len_opts, default_value=5,
-        minv=1, maxv=10_000, step=1, desc_style=DESC
-    )
-
-    num_paths_opts_mode2 = [1000, 2000, 3000, 5000, 10000, 20000, 30000, 40000, 50000]
-    (np_mode_2, np_container_2, np_dd_2, np_txt_2, get_num_paths_2) = _list_or_custom(
-        label="Number of Paths", options=num_paths_opts_mode2, default_value=1000,
-        minv=1, maxv=10_000_000, step=100, desc_style=DESC
-    )
-
-    # ---------- Mode 3: initial & final residues + number of paths ----------
-    final_idx   = W.BoundedIntText(value=1, min=1, max=1_000_000, step=1,
-                                   description="Index of final residue:",
-                                   layout=wide, style=DESC)
-    final_chain = W.Text(value="", description="Chain of final residue:",
-                         placeholder="B", layout=wide, style=DESC)
-
-    num_paths_opts_mode3 = [1000, 2000, 3000, 5000, 10000, 30000, 50000]
-    (np_mode_3, np_container_3, np_dd_3, np_txt_3, get_num_paths_3) = _list_or_custom(
-        label="Number of Paths", options=num_paths_opts_mode3, default_value=1000,
-        minv=1, maxv=10_000_000, step=100, desc_style=DESC
-    )
-
-    # ---------- Actions & output ----------
-    btn_submit = W.Button(description="Submit", button_style="success", icon="paper-plane")
+    # Actions & output
+    btn_submit = W.Button(description="Run (Python readpdb)", button_style="success", icon="play")
     btn_clear  = W.Button(description="Clear",  button_style="warning", icon="trash")
     out        = W.Output()
 
-    # ---------- Grouped layouts ----------
     pdb_row = W.HBox([pdb_code, W.HTML("&nbsp;"), or_lbl, pdb_upload, file_lbl],
                      layout=W.Layout(align_items="center", justify_content="flex-start",
                                      flex_flow="row wrap", gap="10px"))
 
-    functional_box = W.VBox([pl_mode_big, pl_container_big])
-    mode2_box = W.VBox([
-        init_idx, init_chain,
-        pl_mode_short, pl_container_short,
-        np_mode_2,   np_container_2
-    ])
-    mode3_box = W.VBox([
-        init_idx, init_chain,
-        final_idx, final_chain,
-        np_mode_3,  np_container_3
-    ])
-
-    def _sync_mode(*_):
-        functional_box.layout.display = "none"
-        mode2_box.layout.display = "none"
-        mode3_box.layout.display = "none"
-        if pred_type.value == "functional":
-            functional_box.layout.display = ""
-        elif pred_type.value == "paths_init_len":
-            mode2_box.layout.display = ""
-        else:
-            mode3_box.layout.display = ""
-    _sync_mode()
-    pred_type.observe(_sync_mode, names="value")
-
-    # ---------- Render UI ----------
     children = []
     if logo: children.append(logo)
     children += [
@@ -328,15 +344,12 @@ def launch(
         W.HTML("<b>Prediction of:</b>"),
         pred_type,
         functional_box,
-        mode2_box,
-        mode3_box,
         chain_id, email,
         W.HBox([btn_submit, btn_clear]),
         W.HTML("<hr>"), out
     ]
     display(W.VBox(children, layout=W.Layout(width="auto")))
 
-    # -------------------- handlers --------------------
     def on_clear(_):
         pdb_code.value = ""
         try:
@@ -346,18 +359,11 @@ def launch(
         file_lbl.value = "No file chosen"
         chain_id.value = ""
         email.value = ""
-        pred_type.value = "functional"
-        _sync_mode()
         pl_mode_big.value = "list"
-        pl_mode_short.value = "list"
-        np_mode_2.value = "list"
-        np_mode_3.value = "list"
-        pl_dd_big.value = pl_dd_big.options[0]; pl_txt_big.value = int(pl_dd_big.options[0])
-        init_idx.value = 1; init_chain.value = ""
-        pl_dd_short.value = pl_dd_short.options[0]; pl_txt_short.value = int(pl_dd_short.options[0])
-        np_dd_2.value = np_dd_2.options[0];       np_txt_2.value = int(np_dd_2.options[0])
-        final_idx.value = 1; final_chain.value = ""
-        np_dd_3.value = np_dd_3.options[0];       np_txt_3.value = int(np_dd_3.options[0])
+        try:
+            pl_dd_big.value = pl_dd_big.options[0]; pl_txt_big.value = int(pl_dd_big.options[0])
+        except Exception:
+            pass
         with out: clear_output()
 
     def _collect_pdb_bytes():
@@ -384,399 +390,56 @@ def launch(
                 pdb_bytes, pdb_name = _collect_pdb_bytes()
 
                 # Save PDB
+                os.makedirs(SAVE_DIR, exist_ok=True)
                 save_path = os.path.join(SAVE_DIR, pdb_name)
                 with open(save_path, "wb") as f:
                     f.write(pdb_bytes)
                 print(f"Saved local copy: {save_path}")
 
-                # Build mcpath_input.txt
+                # Build mcpath_input.txt (for compatibility/logging)
                 input_path = os.path.join(os.path.dirname(save_path), "mcpath_input.txt")
-                rows = []
-                mode = pred_type.value
-
-                if mode == "functional":
-                    rows = [
-                        "1",              # mode
-                        pdb_name,         # pdb file name
-                        chain_global,     # global chain
-                        str(get_big_len()),
-                        email.value.strip() or "-"
-                    ]
-                elif mode == "paths_init_len":
-                    if not _is_valid_chain(init_chain.value or ""):
-                        raise ValueError("Chain of initial residue must be a single character.")
-                    rows = [
-                        "2",
-                        pdb_name,
-                        chain_global,
-                        str(get_short_len()),
-                        str(get_num_paths_2()),
-                        str(int(init_idx.value)),
-                        (init_chain.value or "").strip(),
-                        email.value.strip() or "-"
-                    ]
-                else:  # paths_init_final
-                    if not _is_valid_chain(init_chain.value or ""):
-                        raise ValueError("Chain of initial residue must be a single character.")
-                    if not _is_valid_chain(final_chain.value or ""):
-                        raise ValueError("Chain of final residue must be a single character.")
-                    rows = [
-                        "3",
-                        pdb_name,
-                        chain_global,
-                        str(int(init_idx.value)),
-                        (init_chain.value or "").strip(),
-                        str(int(final_idx.value)),
-                        (final_chain.value or "").strip(),
-                        email.value.strip() or "-",
-                        str(int(get_num_paths_3())),
-                    ]
-
+                rows = [
+                    "1",              # mode (functional)
+                    pdb_name,         # pdb file name
+                    chain_global,     # global chain
+                    str(get_big_len()),
+                    email.value.strip() or "-"
+                ]
                 with open(input_path, "w") as f:
                     for r in rows:
                         f.write(str(r).strip() + "\n")
                 print(f"Input file saved: {input_path}")
 
-                # Optional POST
-                data = {
-                    "prediction_mode": mode,
-                    FN["chain_id"]: chain_global,
-                }
-                if pdb_code.value.strip():
-                    data[FN["pdb_code"]] = pdb_code.value.strip().upper()
-                if email.value.strip():
-                    data[FN["email"]] = email.value.strip()
+                # ---- Run Python readpdb replacement ----
+                print("▶ Running Python readpdb…")
+                cor_path, nrows, nprob = readpdb_py(save_path, chain_global)
+                # Normalize to coor_file (without overwrite)
+                coor_norm = _copy_to_free_name(cor_path, os.path.join(os.path.dirname(save_path), "coor_file"))
 
-                if mode == "functional":
-                    data[FN["path_length"]] = str(get_big_len())
-                elif mode == "paths_init_len":
-                    data.update({
-                        "length_paths":  int(get_short_len()),
-                        "number_paths":  int(get_num_paths_2()),
-                        "index_initial": int(init_idx.value),
-                        "chain_initial": (init_chain.value or "").strip(),
-                    })
-                else:
-                    data.update({
-                        "index_initial": int(init_idx.value),
-                        "chain_initial": (init_chain.value or "").strip(),
-                        "index_final":   int(final_idx.value),
-                        "chain_final":   (final_chain.value or "").strip(),
-                        "number_paths":  int(get_num_paths_3()),
-                    })
+                print("✅ readpdb completed.")
+                print(f"Rows written: {nrows}")
+                if nprob:
+                    print(f"⚠️ problem file written with {nprob} entries.")
 
-                files = {"pdb_file": (pdb_name, pdb_bytes, "chemical/x-pdb")}
+                # Preview first 8 lines of coor_file (or the .cor)
+                preview_path = coor_norm if coor_norm and os.path.exists(coor_norm) else cor_path
+                try:
+                    print("\n--- Preview (first 8 lines) ---")
+                    with open(preview_path, "r") as f:
+                        for i, line in enumerate(f):
+                            if i >= 8: break
+                            print(line.rstrip("\n"))
+                except Exception as e:
+                    print("Preview unavailable:", e)
 
-                if not target_url:
-                    print("\n(No target_url set) — preview only payload below:\n")
-                    preview = dict(data); preview["attached_file"] = pdb_name
-                    print(preview)
-                else:
-                    print("▶ POSTing to server… (≤20s timeout)")
-                    r = requests.post(target_url, data=data, files=files, timeout=20)
-                    print("HTTP", r.status_code)
-                    try: print("JSON:", r.json())
-                    except Exception: print("Response (≤800 chars):\n", r.text[:800])
+                print(f"\nOutputs:")
+                print(f"  • .cor file : {cor_path}")
+                if coor_norm:
+                    print(f"  • coor_file : {coor_norm}")
+                if os.path.exists(os.path.join(os.path.dirname(save_path), "problem")):
+                    print(f"  • problem   : {os.path.join(os.path.dirname(save_path), 'problem')}")
 
-                # ---- Run Octave after submit? (INSIDE on_submit) ----
-                if bool(cfg.get("run_octave_after_submit", False)):
-                    SAVE_DIR_REAL = os.path.dirname(save_path)
-
-                    # Ensure pdbreader.m (shim or URL)
-                    rp_parser = os.path.join(SAVE_DIR_REAL, "pdbreader.m")
-                    pdbreader_url = (cfg.get("pdbreader_url") or "").strip()
-                    try:
-                        if pdbreader_url:
-                            print(f"Fetching pdbreader.m (≤15s): {pdbreader_url}")
-                            rb = requests.get(pdbreader_url, timeout=15).content
-                            with open(rp_parser, "wb") as f: f.write(rb)
-                            print(f"Saved: {rp_parser}")
-                        else:
-                            with open(rp_parser, "w") as f: f.write(PDBREADER_SHIM_TEXT)
-                            print(f"Using built-in pdbreader shim at: {rp_parser}")
-                    except Exception as _e:
-                        with open(rp_parser, "w") as f: f.write(PDBREADER_SHIM_TEXT)
-                        print(f"(Fallback) Using built-in pdbreader shim at: {rp_parser}")
-
-                    # Ensure readpdb.m
-                    rp_readpdb = os.path.join(SAVE_DIR_REAL, "readpdb.m")
-                    have_readpdb = False
-                    try:
-                        local_candidate = "/content/mcpath-colab/matlab/readpdb.m"
-                        if os.path.exists(local_candidate):
-                            with open(local_candidate, "rb") as src, open(rp_readpdb, "wb") as dst:
-                                dst.write(src.read())
-                            have_readpdb = True
-                            print(f"Copied readpdb.m to: {rp_readpdb}")
-                    except Exception:
-                        pass
-                    if not have_readpdb:
-                        readpdb_url = (cfg.get("readpdb_url") or "").strip()
-                        if readpdb_url:
-                            try:
-                                print(f"Fetching readpdb.m (≤15s): {readpdb_url}")
-                                rb = requests.get(readpdb_url, timeout=15).content
-                                with open(rp_readpdb, "wb") as f: f.write(rb)
-                                have_readpdb = True
-                                print(f"Saved: {rp_readpdb}")
-                            except Exception as e:
-                                print("WARN: failed to fetch readpdb.m:", e)
-                    if not have_readpdb:
-                        print("❌ readpdb.m not found. Set readpdb_url in config or place it in mcpath-colab/matlab/")
-                        return
-
-                    # === Ensure atomistic.m, infinite.m, and required data files ===
-                    def _ensure_file(target_path, local_candidates=(), url_key=None, human_name=None):
-                        """Write file to target_path from first available source: local_candidates then cfg[url_key]."""
-                        os.makedirs(os.path.dirname(target_path), exist_ok=True)
-                        # 1) local candidates
-                        for lc in local_candidates:
-                            try:
-                                if lc and os.path.exists(lc):
-                                    with open(lc, "rb") as src, open(target_path, "wb") as dst:
-                                        dst.write(src.read())
-                                    print(f"Saved {human_name or os.path.basename(target_path)} from local: {lc}")
-                                    return True
-                            except Exception as e:
-                                print(f"WARN: copy failed for {lc}: {e}")
-                        # 2) URL fallback
-                        if url_key and cfg.get(url_key):
-                            try:
-                                url = cfg[url_key].strip()
-                                print(f"Fetching {human_name or os.path.basename(target_path)} (≤15s): {url}")
-                                rb = requests.get(url, timeout=15).content
-                                with open(target_path, "wb") as f: f.write(rb)
-                                print(f"Saved: {target_path}")
-                                return True
-                            except Exception as e:
-                                print(f"WARN: failed to fetch {human_name or target_path}: {e}")
-                        return False
-
-                    atomistic_m   = os.path.join(SAVE_DIR_REAL, "atomistic.m")
-                    infinite_m    = os.path.join(SAVE_DIR_REAL, "infinite.m")
-                    vdw_param     = os.path.join(SAVE_DIR_REAL, "vdw_cns.param")
-                    pdb_top       = os.path.join(SAVE_DIR_REAL, "pdb_cns.top")
-
-                    _ensure_file(atomistic_m,
-                                 local_candidates=["/content/mcpath-colab/matlab/atomistic.m"],
-                                 url_key="atomistic_url", human_name="atomistic.m")
-                    _ensure_file(infinite_m,
-                                 local_candidates=["/content/mcpath-colab/matlab/infinite.m"],
-                                 url_key="infinite_url", human_name="infinite.m")
-                    _ensure_file(vdw_param,
-                                 local_candidates=["/content/mcpath-colab/matlab/vdw_cns.param"],
-                                 url_key="vdw_param_url", human_name="vdw_cns.param")
-                    _ensure_file(pdb_top,
-                                 local_candidates=["/content/mcpath-colab/matlab/pdb_cns.top"],
-                                 url_key="pdb_top_url", human_name="pdb_cns.top")
-
-                    for must in [atomistic_m, infinite_m, vdw_param, pdb_top]:
-                        if not os.path.exists(must):
-                            print(f"❌ Required file missing: {must}. Provide local copy or set its URL in config.")
-
-                    # Runner with diary + full pipeline
-                    runner_path = os.path.join(SAVE_DIR_REAL, "run_mcpath.m")
-                    extra_paths = cfg.get("matlab_paths", []) or []
-                    addpath_lines = ""
-                    for p in extra_paths:
-                        p_esc = p.replace("'", "''")
-                        addpath_lines += f"addpath(genpath('{p_esc}'));\n"
-                    addpath_lines += "addpath(genpath('/content')); addpath(genpath('/content/mcpath-colab'));\n"
-
-                    cd_escaped = SAVE_DIR_REAL.replace("'", "''")
-                    runner = f"""
-diary off; diary('octave.log');  % start logging
-try
-  {addpath_lines}
-  cd('{cd_escaped}');
-  if exist('readpdb','file') ~= 2, error('readpdb.m not on path'); end
-  if exist('atomistic','file') ~= 2, warning('atomistic.m not found on path'); end
-  if exist('infinite','file')  ~= 2, warning('infinite.m not found on path'); end
-
-  % --- Read mcpath_input.txt ---
-  fid = fopen('mcpath_input.txt','r'); assert(fid>0,'cannot open mcpath_input.txt');
-  a = {{}}; line = fgetl(fid);
-  while ischar(line), a{{end+1,1}} = strtrim(line); line = fgetl(fid); end
-  fclose(fid);
-
-  % a{{1}} = mode
-  % a{{2}} = pdb filename
-  % a{{3}} = global chain
-  % functional (mode=1): a{{4}}=path_length
-  % paths_init_len (mode=2): a{{4}}=LengthOfPaths, a{{5}}=NumberPaths, a{{6}}=InitIndex, a{{7}}=InitChain
-  % paths_init_final (mode=3): a{{4}}=InitIndex, a{{5}}=InitChain, a{{6}}=FinalIndex, a{{7}}=FinalChain, a{{8}}=NumberPaths
-
-  fprintf('Running readpdb on %s (chain %s)\\n', a{{2}}, a{{3}});
-  readpdb(a{{2}}, a{{3}});  % user main parser
-
-  % --- Derive steps for infinite() depending on mode ---
-  mode = str2double(a{{1}});
-  steps = 0;
-  if mode == 1
-      steps = str2double(a{{4}});   % big path length
-  elseif mode == 2
-      steps = str2double(a{{4}});   % short path length
-  elseif mode == 3
-      if numel(a) >= 8
-          steps = str2double(a{{8}});  % reuse number_paths as step proxy
-      else
-          steps = 1000;
-      end
-  else
-      steps = 1000;
-  end
-  if ~isfinite(steps) || steps <= 0
-      steps = 1000;
-  end
-
-  % --- Call atomistic & infinite if available ---
-  if exist('atomistic','file') == 2
-      fprintf('Running atomistic(%s)\\n', a{{2}});
-      try
-          atomistic(a{{2}});
-      catch atomErr
-          warning('atomistic() failed: %s', atomErr.message);
-      end
-  else
-      warning('atomistic.m missing — skipping atomistic()');
-  end
-
-  if exist('infinite','file') == 2
-      fprintf('Running infinite(%s, %d)\\n', a{{2}}, steps);
-      try
-          infinite(a{{2}}, steps);
-      catch infErr
-          warning('infinite() failed: %s', infErr.message);
-      end
-  else
-      warning('infinite.m missing — skipping infinite()');
-  end
-
-  % --- Normalize outputs to coor_file, atom_file, path_file (auto-suffix if exist) ---
-  coor_src = [a{{2}} '.cor'];
-  atom_src = [a{{2}} '_atomistic.out'];
-  path_src = [a{{2}} '_atomistic_' num2str(steps) 'steps_infinite.path'];
-
-  function tf = copy_to_free_name(src, dst_base)
-      tf = false;
-      if exist(src, 'file') ~= 2, return; end
-      dst = dst_base;
-      k = 1;
-      while exist(dst, 'file') == 2
-          dst = sprintf('%s.%d', dst_base, k);
-          k = k + 1;
-      end
-      try
-          copyfile(src, dst);
-          tf = true;
-          fprintf('Saved %s -> %s\\n', src, dst);
-      catch
-          warning('Failed to copy %s -> %s', src, dst);
-      end
-  end
-
-  copy_to_free_name(coor_src, 'coor_file');
-  copy_to_free_name(atom_src, 'atom_file');
-  copy_to_free_name(path_src, 'path_file');
-
-  diary off; exit(0);
-catch err
-  fiderr = fopen('error','w');
-  if fiderr>0
-      fprintf(fiderr,'ERROR: %s\\n', err.message);
-      fclose(fiderr);
-  end
-  diary off; exit(1);
-end
-"""
-                    with open(runner_path, "w") as f:
-                        f.write(runner)
-
-                    # --- Ensure Octave is present and run (hardened) ---
-                    print("▶ Launching Octave… (timeout=420s)")
-                    try:
-                        # 1) Find (or install) Octave and print path
-                        octave_cmd = _ensure_octave_and_pick_cmd(install_timeout=420)
-                        print(f"Using Octave at: {octave_cmd}")
-
-                        # 2) Print version to verify the binary is runnable
-                        try:
-                            ver = subprocess.run([octave_cmd, "--version"], text=True, capture_output=True, timeout=30)
-                            print("Octave version:\n", (ver.stdout or ver.stderr)[:2000])
-                        except Exception as e_ver:
-                            print("WARN: could not query Octave version:", e_ver)
-
-                        # 3) Quick smoke test (fail fast if the CLI is broken)
-                        try:
-                            smoke = subprocess.run(
-                                [octave_cmd, "-qf", "--no-gui", "--no-window-system",
-                                 "--eval", "disp('OCTAVE_SMOKE_OK'); exit(0);"],
-                                text=True, capture_output=True, timeout=30
-                            )
-                            if smoke.returncode != 0 or "OCTAVE_SMOKE_OK" not in (smoke.stdout + smoke.stderr):
-                                print("WARN: Octave smoke test output:\n", (smoke.stdout + smoke.stderr)[:1000])
-                                raise RuntimeError("Octave smoke test failed")
-                        except Exception as e_smoke:
-                            print("❌ Octave smoke test failed:", e_smoke)
-                            raise
-
-                        # 4) Run your runner script with a robust --eval wrapper that always exits
-                        eval_code = (
-                            "try, run('run_mcpath.m'); "
-                            "catch err, "
-                            "  disp('RUNNER_ERROR_BEGIN'); "
-                            "  disp(getReport(err, 'extended')); "
-                            "  disp('RUNNER_ERROR_END'); "
-                            "  exit(1); "
-                            "end; "
-                            "exit(0);"
-                        )
-
-                        proc = subprocess.run(
-                            [octave_cmd, "-qf", "--no-gui", "--no-window-system", "--eval", eval_code],
-                            text=True, capture_output=True, timeout=420
-                        )
-                        rc = proc.returncode
-                        if proc.stdout:
-                            print("\n--- Octave STDOUT (tail) ---\n", proc.stdout[-2000:])
-                        if proc.stderr:
-                            print("\n--- Octave STDERR (tail) ---\n", proc.stderr[-2000:])
-
-                    except subprocess.TimeoutExpired:
-                        print("❌ Octave timed out after 420s. Check /content/octave.log")
-                        rc = -1
-                    except FileNotFoundError as e:
-                        print("❌", e)
-                        rc = -2
-                    except Exception as e:
-                        print("❌ Unexpected error launching Octave:", e)
-                        rc = -3
-
-                    # Show diary tail and error file (if created by run_mcpath.m)
-                    log_path = os.path.join(SAVE_DIR_REAL, "octave.log")
-                    if os.path.exists(log_path):
-                        try:
-                            with open(log_path, "r") as lf:
-                                log = lf.read()
-                            tail = log[-4000:] if len(log) > 4000 else log
-                            print("\n--- octave.log (tail) ---\n", tail)
-                        except Exception as e:
-                            print("WARN: could not read octave.log:", e)
-
-                    err_file = os.path.join(SAVE_DIR_REAL, "error")
-                    if os.path.exists(err_file):
-                        try:
-                            with open(err_file, "r") as ef:
-                                print("\n--- error file ---\n", ef.read()[:4000])
-                        except Exception as e:
-                            print("WARN: could not read error file:", e)
-
-                    if rc != 0:
-                        print("❌ Octave failed. Return code:", rc)
-                    else:
-                        print("✅ Octave finished successfully.")
-
-            except Exception as e:   # <-- this 'except' closes the outer try
+            except Exception as e:
                 print("❌", e)
 
     btn_clear.on_click(on_clear)
