@@ -3,6 +3,10 @@ import os, re, requests, yaml, subprocess, shutil, sys
 from IPython.display import display, clear_output
 import ipywidgets as W
 
+# -------------------- Singleton guard for the form --------------------
+_FORM_SHOWN = False
+_FORM_HANDLE = None
+
 # -------------------- Octave availability helper --------------------
 def _ensure_octave_and_pick_cmd(install_timeout=300):
     """
@@ -38,18 +42,15 @@ def _ensure_octave_and_pick_cmd(install_timeout=300):
             r"C:\Program Files\GNU Octave\Octave-8.4.0\mingw64\bin\octave-cli.exe",
         ]
     elif sysname == "darwin":
-        # Homebrew and app bundle CLI shims
         candidates += [
             "/opt/homebrew/bin/octave",        # Apple Silicon
             "/usr/local/bin/octave",           # Intel mac
             "/Applications/Octave.app/Contents/Resources/usr/bin/octave-cli",
         ]
     else:
-        # Linux typical paths (including conda)
         candidates += [
             "/usr/bin/octave", "/usr/local/bin/octave",
             "/usr/bin/octave-cli", "/usr/local/bin/octave-cli",
-            # conda-forge (common prefixes)
             os.path.expanduser("~/.conda/envs/base/bin/octave"),
             os.path.expanduser("~/.mambaforge/bin/octave"),
             os.path.expanduser("~/.miniforge3/bin/octave"),
@@ -88,7 +89,6 @@ def _ensure_octave_and_pick_cmd(install_timeout=300):
     )
 
 # -------------------- Octave pdbreader shim (fallback) --------------------
-# Only used if you don't supply a real pdbreader.m via cfg['pdbreader_url'].
 PDBREADER_SHIM_TEXT = r"""
 function pdb = pdbreader(filename)
   fid = fopen(filename,'r'); assert(fid>0,'pdbreader: cannot open %s',filename);
@@ -190,9 +190,20 @@ def _logo_widget(branding: dict):
 # -------------------- main UI --------------------
 def launch(
     defaults_url="https://raw.githubusercontent.com/enesemretas/mcpath-colab/main/config/defaults.yaml",
-    show_title="MCPath-style Parameters"
+    show_title="MCPath-style Parameters",
+    allow_multiple=False
 ):
     """Launch the MCPath parameter form."""
+    global _FORM_SHOWN, _FORM_HANDLE
+
+    # Singleton guard
+    if _FORM_SHOWN and not allow_multiple:
+        if _FORM_HANDLE is not None:
+            display(_FORM_HANDLE)
+        else:
+            print("ℹ️ MCPath form already displayed.")
+        return
+
     cfg = yaml.safe_load(requests.get(defaults_url, timeout=15).text)
     target_url = cfg.get("target_url", "").strip()
     FN = cfg["field_names"]
@@ -334,7 +345,10 @@ def launch(
         W.HBox([btn_submit, btn_clear]),
         W.HTML("<hr>"), out
     ]
-    display(W.VBox(children, layout=W.Layout(width="auto")))
+    root = W.VBox(children, layout=W.Layout(width="auto"))
+    display(root)
+    _FORM_SHOWN = True
+    _FORM_HANDLE = root
 
     # -------------------- handlers --------------------
     def on_clear(_):
@@ -478,7 +492,7 @@ def launch(
                     try: print("JSON:", r.json())
                     except Exception: print("Response (≤800 chars):\n", r.text[:800])
 
-                # ---- Run Octave after submit? (INSIDE on_submit) ----
+                # ---- Run Octave after submit? ----
                 if bool(cfg.get("run_octave_after_submit", False)):
                     SAVE_DIR_REAL = os.path.dirname(save_path)
 
@@ -494,7 +508,7 @@ def launch(
                         else:
                             with open(rp_parser, "w") as f: f.write(PDBREADER_SHIM_TEXT)
                             print(f"Using built-in pdbreader shim at: {rp_parser}")
-                    except Exception as _e:
+                    except Exception:
                         with open(rp_parser, "w") as f: f.write(PDBREADER_SHIM_TEXT)
                         print(f"(Fallback) Using built-in pdbreader shim at: {rp_parser}")
 
@@ -574,7 +588,7 @@ def launch(
                         if not os.path.exists(must):
                             print(f"❌ Required file missing: {must}. Provide local copy or set its URL in config.")
 
-                    # Runner with diary + full pipeline
+                    # --------- Write runner (with visible progress) ----------
                     runner_path = os.path.join(SAVE_DIR_REAL, "run_mcpath.m")
                     extra_paths = cfg.get("matlab_paths", []) or []
                     addpath_lines = ""
@@ -585,55 +599,45 @@ def launch(
 
                     cd_escaped = SAVE_DIR_REAL.replace("'", "''")
                     runner = f"""
-diary off; diary('octave.log');  % start logging
+diary off; diary('octave.log');
 try
   {addpath_lines}
   cd('{cd_escaped}');
+  printf('RUNNER_START\\n'); fflush(stdout);
+
   if exist('readpdb','file') ~= 2, error('readpdb.m not on path'); end
   if exist('atomistic','file') ~= 2, warning('atomistic.m not found on path'); end
   if exist('infinite','file')  ~= 2, warning('infinite.m not found on path'); end
 
-  % --- Read mcpath_input.txt ---
   fid = fopen('mcpath_input.txt','r'); assert(fid>0,'cannot open mcpath_input.txt');
   a = {{}}; line = fgetl(fid);
   while ischar(line), a{{end+1,1}} = strtrim(line); line = fgetl(fid); end
   fclose(fid);
 
-  % a{{1}} = mode
-  % a{{2}} = pdb filename
-  % a{{3}} = global chain
-  % functional (mode=1): a{{4}}=path_length
-  % paths_init_len (mode=2): a{{4}}=LengthOfPaths, a{{5}}=NumberPaths, a{{6}}=InitIndex, a{{7}}=InitChain
-  % paths_init_final (mode=3): a{{4}}=InitIndex, a{{5}}=InitChain, a{{6}}=FinalIndex, a{{7}}=FinalChain, a{{8}}=NumberPaths
+  printf('RUNNER_GOT_INPUT: mode=%s pdb=%s chain=%s\\n', a{{1}}, a{{2}}, a{{3}}); fflush(stdout);
 
   fprintf('Running readpdb on %s (chain %s)\\n', a{{2}}, a{{3}});
-  readpdb(a{{2}}, a{{3}});  % user main parser
+  readpdb(a{{2}}, a{{3}});
+  printf('READPDB_DONE\\n'); fflush(stdout);
 
-  % --- Derive steps for infinite() depending on mode ---
   mode = str2double(a{{1}});
   steps = 0;
   if mode == 1
-      steps = str2double(a{{4}});   % big path length
+      steps = str2double(a{{4}});
   elseif mode == 2
-      steps = str2double(a{{4}});   % short path length
+      steps = str2double(a{{4}});
   elseif mode == 3
-      if numel(a) >= 8
-          steps = str2double(a{{8}});  % reuse number_paths as step proxy
-      else
-          steps = 1000;
-      end
+      if numel(a) >= 8, steps = str2double(a{{8}}); else, steps = 1000; end
   else
       steps = 1000;
   end
-  if ~isfinite(steps) || steps <= 0
-      steps = 1000;
-  end
+  if ~isfinite(steps) || steps <= 0, steps = 1000; end
 
-  % --- Call atomistic & infinite if available ---
   if exist('atomistic','file') == 2
       fprintf('Running atomistic(%s)\\n', a{{2}});
       try
           atomistic(a{{2}});
+          printf('ATOMISTIC_DONE\\n'); fflush(stdout);
       catch atomErr
           warning('atomistic() failed: %s', atomErr.message);
       end
@@ -645,6 +649,7 @@ try
       fprintf('Running infinite(%s, %d)\\n', a{{2}}, steps);
       try
           infinite(a{{2}}, steps);
+          printf('INFINITE_DONE\\n'); fflush(stdout);
       catch infErr
           warning('infinite() failed: %s', infErr.message);
       end
@@ -652,7 +657,6 @@ try
       warning('infinite.m missing — skipping infinite()');
   end
 
-  % --- Normalize outputs to coor_file, atom_file, path_file (auto-suffix if exist) ---
   coor_src = [a{{2}} '.cor'];
   atom_src = [a{{2}} '_atomistic.out'];
   path_src = [a{{2}} '_atomistic_' num2str(steps) 'steps_infinite.path'];
@@ -660,18 +664,12 @@ try
   function tf = copy_to_free_name(src, dst_base)
       tf = false;
       if exist(src, 'file') ~= 2, return; end
-      dst = dst_base;
-      k = 1;
+      dst = dst_base; k = 1;
       while exist(dst, 'file') == 2
-          dst = sprintf('%s.%d', dst_base, k);
-          k = k + 1;
+          dst = sprintf('%s.%d', dst_base, k); k = k + 1;
       end
-      try
-          copyfile(src, dst);
-          tf = true;
-          fprintf('Saved %s -> %s\\n', src, dst);
-      catch
-          warning('Failed to copy %s -> %s', src, dst);
+      try, copyfile(src, dst); tf = true; fprintf('Saved %s -> %s\\n', src, dst);
+      catch, warning('Failed to copy %s -> %s', src, dst);
       end
   end
 
@@ -679,13 +677,11 @@ try
   copy_to_free_name(atom_src, 'atom_file');
   copy_to_free_name(path_src, 'path_file');
 
+  printf('RUNNER_END\\n'); fflush(stdout);
   diary off; exit(0);
 catch err
   fiderr = fopen('error','w');
-  if fiderr>0
-      fprintf(fiderr,'ERROR: %s\\n', err.message);
-      fclose(fiderr);
-  end
+  if fiderr>0, fprintf(fiderr,'ERROR: %s\\n', err.message); fclose(fiderr); end
   diary off; exit(1);
 end
 """
@@ -695,22 +691,21 @@ end
                     # --- Ensure Octave is present and run (hardened) ---
                     print("▶ Launching Octave… (timeout=420s)")
                     try:
-                        # 1) Find (or install) Octave and print path
                         octave_cmd = _ensure_octave_and_pick_cmd(install_timeout=420)
                         print(f"Using Octave at: {octave_cmd}")
 
-                        # 2) Print version to verify the binary is runnable
+                        # Version
                         try:
                             ver = subprocess.run([octave_cmd, "--version"], text=True, capture_output=True, timeout=30)
                             print("Octave version:\n", (ver.stdout or ver.stderr)[:2000])
                         except Exception as e_ver:
                             print("WARN: could not query Octave version:", e_ver)
 
-                        # 3) Quick smoke test (fail fast if the CLI is broken)
+                        # Smoke test
                         try:
                             smoke = subprocess.run(
                                 [octave_cmd, "-qf", "--no-gui", "--no-window-system",
-                                 "--eval", "disp('OCTAVE_SMOKE_OK'); exit(0);"],
+                                 "--eval", "disp('OCTAVE_SMOKE_OK'); fflush(stdout); exit(0);"],
                                 text=True, capture_output=True, timeout=30
                             )
                             if smoke.returncode != 0 or "OCTAVE_SMOKE_OK" not in (smoke.stdout + smoke.stderr):
@@ -720,9 +715,12 @@ end
                             print("❌ Octave smoke test failed:", e_smoke)
                             raise
 
-                        # 4) Run your runner script with a robust --eval wrapper that always exits
+                        # Run runner (correct cwd + self-contained eval)
                         eval_code = (
-                            "try, run('run_mcpath.m'); "
+                            "try, "
+                            f"  cd('{SAVE_DIR_REAL.replace(\"'\", \"''\")}'); "
+                            "  disp('RUN_EVAL_CALLING_RUN_MCPATH'); fflush(stdout); "
+                            "  run('run_mcpath.m'); "
                             "catch err, "
                             "  disp('RUNNER_ERROR_BEGIN'); "
                             "  disp(getReport(err, 'extended')); "
@@ -734,7 +732,8 @@ end
 
                         proc = subprocess.run(
                             [octave_cmd, "-qf", "--no-gui", "--no-window-system", "--eval", eval_code],
-                            text=True, capture_output=True, timeout=420
+                            text=True, capture_output=True, timeout=420,
+                            cwd=SAVE_DIR_REAL
                         )
                         rc = proc.returncode
                         if proc.stdout:
@@ -752,7 +751,7 @@ end
                         print("❌ Unexpected error launching Octave:", e)
                         rc = -3
 
-                    # Show diary tail and error file (if created by run_mcpath.m)
+                    # Show diary tail and error file
                     log_path = os.path.join(SAVE_DIR_REAL, "octave.log")
                     if os.path.exists(log_path):
                         try:
@@ -771,18 +770,32 @@ end
                         except Exception as e:
                             print("WARN: could not read error file:", e)
 
+                    for pth in ["coor_file", "atom_file", "path_file"]:
+                        print(f"Exists {pth}? ", os.path.exists(os.path.join(SAVE_DIR_REAL, pth)))
+
                     if rc != 0:
                         print("❌ Octave failed. Return code:", rc)
                     else:
                         print("✅ Octave finished successfully.")
 
-            except Exception as e:   # <-- this 'except' closes the outer try
+            except Exception as e:
                 print("❌", e)
 
     btn_clear.on_click(on_clear)
     btn_submit.on_click(on_submit)
-# --- Auto-launch in Colab so the form is ready to fill immediately ---
 
+def close_form():
+    """Close the current form so a new one can be created."""
+    global _FORM_SHOWN, _FORM_HANDLE
+    if _FORM_HANDLE is not None:
+        try:
+            _FORM_HANDLE.close()
+        except Exception:
+            pass
+    _FORM_SHOWN = False
+    _FORM_HANDLE = None
+
+# --- Auto-launch in Colab so the form is ready to fill immediately ---
 def _in_colab():
     try:
         import google.colab  # type: ignore
@@ -793,7 +806,7 @@ def _in_colab():
 def autolaunch(defaults_url: str = "https://raw.githubusercontent.com/enesemretas/mcpath-colab/main/config/defaults.yaml"):
     """Manually trigger the UI (useful outside Colab or if autolaunch is disabled)."""
     try:
-        launch(defaults_url=defaults_url)
+        launch(defaults_url=defaults_url, allow_multiple=False)
     except Exception as e:
         print("❌ autolaunch() failed:", e)
 
