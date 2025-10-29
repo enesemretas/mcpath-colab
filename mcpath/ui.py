@@ -1,7 +1,91 @@
 # mcpath/ui.py
-import os, re, requests, yaml, subprocess
+import os, re, requests, yaml, subprocess, shutil, sys
 from IPython.display import display, clear_output
 import ipywidgets as W
+
+# -------------------- Octave availability helper --------------------
+def _ensure_octave_and_pick_cmd(install_timeout=300):
+    """
+    Return a usable Octave executable.
+    Resolution order:
+      1) $OCTAVE_CMD env var
+      2) PATH: octave, then octave-cli
+      3) Common platform paths (Windows/macOS/Linux)
+      4) Colab auto-install (apt-get) when running under /content
+    Raises FileNotFoundError if nothing is found/installed.
+    """
+    import platform
+
+    # 1) Allow explicit override
+    override = os.environ.get("OCTAVE_CMD", "").strip()
+    if override and shutil.which(override):
+        return shutil.which(override)
+
+    # 2) PATH lookup
+    cand = shutil.which("octave") or shutil.which("octave-cli") or shutil.which("octave-cli.exe")
+    if cand:
+        return cand
+
+    # 3) Common install locations by OS
+    sysname = platform.system().lower()
+    candidates = []
+
+    if sysname == "windows":
+        candidates += [
+            r"C:\Octave\Octave-9.1.0\mingw64\bin\octave-cli.exe",
+            r"C:\Octave\Octave-8.4.0\mingw64\bin\octave-cli.exe",
+            r"C:\Program Files\GNU Octave\Octave-9.1.0\mingw64\bin\octave-cli.exe",
+            r"C:\Program Files\GNU Octave\Octave-8.4.0\mingw64\bin\octave-cli.exe",
+        ]
+    elif sysname == "darwin":
+        # Homebrew and app bundle CLI shims
+        candidates += [
+            "/opt/homebrew/bin/octave",        # Apple Silicon
+            "/usr/local/bin/octave",           # Intel mac
+            "/Applications/Octave.app/Contents/Resources/usr/bin/octave-cli",
+        ]
+    else:
+        # Linux typical paths (including conda)
+        candidates += [
+            "/usr/bin/octave", "/usr/local/bin/octave",
+            "/usr/bin/octave-cli", "/usr/local/bin/octave-cli",
+            # conda-forge (common prefixes)
+            os.path.expanduser("~/.conda/envs/base/bin/octave"),
+            os.path.expanduser("~/.mambaforge/bin/octave"),
+            os.path.expanduser("~/.miniforge3/bin/octave"),
+        ]
+
+    for p in candidates:
+        if os.path.exists(p):
+            return p
+
+    # 4) Best-effort auto-install on Colab only
+    in_colab = os.path.isdir("/content") and os.path.exists("/usr/bin/apt-get")
+    if in_colab:
+        try:
+            print("⚙️ Octave not found — installing via apt-get (this may take a couple of minutes)…")
+            subprocess.run(["apt-get", "update", "-qq"], check=True, text=True)
+            subprocess.run(
+                ["apt-get", "install", "-y", "-qq", "octave", "gnuplot"],
+                check=True, text=True, timeout=install_timeout
+            )
+            cand = shutil.which("octave") or shutil.which("octave-cli")
+            if cand:
+                print("✅ Octave installed:", cand)
+                return cand
+        except Exception as e:
+            print("❌ Failed to auto-install Octave on Colab:", e)
+
+    # Nothing worked
+    raise FileNotFoundError(
+        "Octave executable not found.\n"
+        "Install it and/or set OCTAVE_CMD to the full path.\n"
+        "Quick install tips:\n"
+        "  • Ubuntu/Debian:   sudo apt-get update && sudo apt-get install -y octave gnuplot\n"
+        "  • macOS (Homebrew): brew install octave\n"
+        "  • Windows (winget): winget install -e --id GNU.Octave   (or: choco install octave)\n"
+        "  • Conda/Mamba:     conda install -c conda-forge octave gnuplot"
+    )
 
 # -------------------- Octave pdbreader shim (fallback) --------------------
 # Only used if you don't supply a real pdbreader.m via cfg['pdbreader_url'].
@@ -80,7 +164,6 @@ def _list_or_custom(label: str, options, default_value, minv, maxv, step=1, desc
         layout=common_layout, style=desc_style
     )
 
-    # Only one visible at a time
     container = W.VBox([dd])
     def _on_mode(change):
         container.children = [dd] if change["new"] == "list" else [txt]
@@ -256,7 +339,10 @@ def launch(
     # -------------------- handlers --------------------
     def on_clear(_):
         pdb_code.value = ""
-        pdb_upload.value.clear()
+        try:
+            pdb_upload.value.clear()
+        except Exception:
+            pdb_upload.value = {}
         file_lbl.value = "No file chosen"
         chain_id.value = ""
         email.value = ""
@@ -342,7 +428,8 @@ def launch(
                         (init_chain.value or "").strip(),
                         str(int(final_idx.value)),
                         (final_chain.value or "").strip(),
-                        email.value.strip() or "-"
+                        email.value.strip() or "-",
+                        str(int(get_num_paths_3())),
                     ]
 
                 with open(input_path, "w") as f:
@@ -438,7 +525,56 @@ def launch(
                         print("❌ readpdb.m not found. Set readpdb_url in config or place it in mcpath-colab/matlab/")
                         return
 
-                    # Runner with diary + fail fast
+                    # === Ensure atomistic.m, infinite.m, and required data files ===
+                    def _ensure_file(target_path, local_candidates=(), url_key=None, human_name=None):
+                        """Write file to target_path from first available source: local_candidates then cfg[url_key]."""
+                        os.makedirs(os.path.dirname(target_path), exist_ok=True)
+                        # 1) local candidates
+                        for lc in local_candidates:
+                            try:
+                                if lc and os.path.exists(lc):
+                                    with open(lc, "rb") as src, open(target_path, "wb") as dst:
+                                        dst.write(src.read())
+                                    print(f"Saved {human_name or os.path.basename(target_path)} from local: {lc}")
+                                    return True
+                            except Exception as e:
+                                print(f"WARN: copy failed for {lc}: {e}")
+                        # 2) URL fallback
+                        if url_key and cfg.get(url_key):
+                            try:
+                                url = cfg[url_key].strip()
+                                print(f"Fetching {human_name or os.path.basename(target_path)} (≤15s): {url}")
+                                rb = requests.get(url, timeout=15).content
+                                with open(target_path, "wb") as f: f.write(rb)
+                                print(f"Saved: {target_path}")
+                                return True
+                            except Exception as e:
+                                print(f"WARN: failed to fetch {human_name or target_path}: {e}")
+                        return False
+
+                    atomistic_m   = os.path.join(SAVE_DIR_REAL, "atomistic.m")
+                    infinite_m    = os.path.join(SAVE_DIR_REAL, "infinite.m")
+                    vdw_param     = os.path.join(SAVE_DIR_REAL, "vdw_cns.param")
+                    pdb_top       = os.path.join(SAVE_DIR_REAL, "pdb_cns.top")
+
+                    _ensure_file(atomistic_m,
+                                 local_candidates=["/content/mcpath-colab/matlab/atomistic.m"],
+                                 url_key="atomistic_url", human_name="atomistic.m")
+                    _ensure_file(infinite_m,
+                                 local_candidates=["/content/mcpath-colab/matlab/infinite.m"],
+                                 url_key="infinite_url", human_name="infinite.m")
+                    _ensure_file(vdw_param,
+                                 local_candidates=["/content/mcpath-colab/matlab/vdw_cns.param"],
+                                 url_key="vdw_param_url", human_name="vdw_cns.param")
+                    _ensure_file(pdb_top,
+                                 local_candidates=["/content/mcpath-colab/matlab/pdb_cns.top"],
+                                 url_key="pdb_top_url", human_name="pdb_cns.top")
+
+                    for must in [atomistic_m, infinite_m, vdw_param, pdb_top]:
+                        if not os.path.exists(must):
+                            print(f"❌ Required file missing: {must}. Provide local copy or set its URL in config.")
+
+                    # Runner with diary + full pipeline
                     runner_path = os.path.join(SAVE_DIR_REAL, "run_mcpath.m")
                     extra_paths = cfg.get("matlab_paths", []) or []
                     addpath_lines = ""
@@ -447,61 +583,200 @@ def launch(
                         addpath_lines += f"addpath(genpath('{p_esc}'));\n"
                     addpath_lines += "addpath(genpath('/content')); addpath(genpath('/content/mcpath-colab'));\n"
 
+                    cd_escaped = SAVE_DIR_REAL.replace("'", "''")
                     runner = f"""
 diary off; diary('octave.log');  % start logging
 try
   {addpath_lines}
+  cd('{cd_escaped}');
   if exist('readpdb','file') ~= 2, error('readpdb.m not on path'); end
+  if exist('atomistic','file') ~= 2, warning('atomistic.m not found on path'); end
+  if exist('infinite','file')  ~= 2, warning('infinite.m not found on path'); end
+
+  % --- Read mcpath_input.txt ---
   fid = fopen('mcpath_input.txt','r'); assert(fid>0,'cannot open mcpath_input.txt');
   a = {{}}; line = fgetl(fid);
-  while ischar(line), a{{end+1,1}} = line; line = fgetl(fid); end
+  while ischar(line), a{{end+1,1}} = strtrim(line); line = fgetl(fid); end
   fclose(fid);
-  fprintf('Running readpdb on %%s (chain %%s)\\n', a{{2}}, a{{3}});
-  readpdb(a{{2}}, a{{3}});
+
+  % a{{1}} = mode
+  % a{{2}} = pdb filename
+  % a{{3}} = global chain
+  % functional (mode=1): a{{4}}=path_length
+  % paths_init_len (mode=2): a{{4}}=LengthOfPaths, a{{5}}=NumberPaths, a{{6}}=InitIndex, a{{7}}=InitChain
+  % paths_init_final (mode=3): a{{4}}=InitIndex, a{{5}}=InitChain, a{{6}}=FinalIndex, a{{7}}=FinalChain, a{{8}}=NumberPaths
+
+  fprintf('Running readpdb on %s (chain %s)\\n', a{{2}}, a{{3}});
+  readpdb(a{{2}}, a{{3}});  % user main parser
+
+  % --- Derive steps for infinite() depending on mode ---
+  mode = str2double(a{{1}});
+  steps = 0;
+  if mode == 1
+      steps = str2double(a{{4}});   % big path length
+  elseif mode == 2
+      steps = str2double(a{{4}});   % short path length
+  elseif mode == 3
+      if numel(a) >= 8
+          steps = str2double(a{{8}});  % reuse number_paths as step proxy
+      else
+          steps = 1000;
+      end
+  else
+      steps = 1000;
+  end
+  if ~isfinite(steps) || steps <= 0
+      steps = 1000;
+  end
+
+  % --- Call atomistic & infinite if available ---
+  if exist('atomistic','file') == 2
+      fprintf('Running atomistic(%s)\\n', a{{2}});
+      try
+          atomistic(a{{2}});
+      catch atomErr
+          warning('atomistic() failed: %s', atomErr.message);
+      end
+  else
+      warning('atomistic.m missing — skipping atomistic()');
+  end
+
+  if exist('infinite','file') == 2
+      fprintf('Running infinite(%s, %d)\\n', a{{2}}, steps);
+      try
+          infinite(a{{2}}, steps);
+      catch infErr
+          warning('infinite() failed: %s', infErr.message);
+      end
+  else
+      warning('infinite.m missing — skipping infinite()');
+  end
+
+  % --- Normalize outputs to coor_file, atom_file, path_file (auto-suffix if exist) ---
+  coor_src = [a{{2}} '.cor'];
+  atom_src = [a{{2}} '_atomistic.out'];
+  path_src = [a{{2}} '_atomistic_' num2str(steps) 'steps_infinite.path'];
+
+  function tf = copy_to_free_name(src, dst_base)
+      tf = false;
+      if exist(src, 'file') ~= 2, return; end
+      dst = dst_base;
+      k = 1;
+      while exist(dst, 'file') == 2
+          dst = sprintf('%s.%d', dst_base, k);
+          k = k + 1;
+      end
+      try
+          copyfile(src, dst);
+          tf = true;
+          fprintf('Saved %s -> %s\\n', src, dst);
+      catch
+          warning('Failed to copy %s -> %s', src, dst);
+      end
+  end
+
+  copy_to_free_name(coor_src, 'coor_file');
+  copy_to_free_name(atom_src, 'atom_file');
+  copy_to_free_name(path_src, 'path_file');
+
   diary off; exit(0);
 catch err
   fiderr = fopen('error','w');
-  if fiderr>0, fprintf(fiderr,'ERROR: %s\\n', err.message); fclose(fiderr); end
+  if fiderr>0
+      fprintf(fiderr,'ERROR: %s\\n', err.message);
+      fclose(fiderr);
+  end
   diary off; exit(1);
 end
 """
                     with open(runner_path, "w") as f:
                         f.write(runner)
 
-                    # Run Octave with a hard timeout
-                    cd_escaped = SAVE_DIR_REAL.replace("'", "''")
-                    print("▶ Launching Octave… (timeout=180s)")
+                    # --- Ensure Octave is present and run (hardened) ---
+                    print("▶ Launching Octave… (timeout=420s)")
                     try:
+                        # 1) Find (or install) Octave and print path
+                        octave_cmd = _ensure_octave_and_pick_cmd(install_timeout=420)
+                        print(f"Using Octave at: {octave_cmd}")
+
+                        # 2) Print version to verify the binary is runnable
+                        try:
+                            ver = subprocess.run([octave_cmd, "--version"], text=True, capture_output=True, timeout=30)
+                            print("Octave version:\n", (ver.stdout or ver.stderr)[:2000])
+                        except Exception as e_ver:
+                            print("WARN: could not query Octave version:", e_ver)
+
+                        # 3) Quick smoke test (fail fast if the CLI is broken)
+                        try:
+                            smoke = subprocess.run(
+                                [octave_cmd, "-qf", "--no-gui", "--no-window-system",
+                                 "--eval", "disp('OCTAVE_SMOKE_OK'); exit(0);"],
+                                text=True, capture_output=True, timeout=30
+                            )
+                            if smoke.returncode != 0 or "OCTAVE_SMOKE_OK" not in (smoke.stdout + smoke.stderr):
+                                print("WARN: Octave smoke test output:\n", (smoke.stdout + smoke.stderr)[:1000])
+                                raise RuntimeError("Octave smoke test failed")
+                        except Exception as e_smoke:
+                            print("❌ Octave smoke test failed:", e_smoke)
+                            raise
+
+                        # 4) Run your runner script with a robust --eval wrapper that always exits
+                        eval_code = (
+                            "try, run('run_mcpath.m'); "
+                            "catch err, "
+                            "  disp('RUNNER_ERROR_BEGIN'); "
+                            "  disp(getReport(err, 'extended')); "
+                            "  disp('RUNNER_ERROR_END'); "
+                            "  exit(1); "
+                            "end; "
+                            "exit(0);"
+                        )
+
                         proc = subprocess.run(
-                            ["octave", "-qf", "--eval", f"cd('{cd_escaped}'); run('run_mcpath.m');"],
-                            text=True, timeout=180
+                            [octave_cmd, "-qf", "--no-gui", "--no-window-system", "--eval", eval_code],
+                            text=True, capture_output=True, timeout=420
                         )
                         rc = proc.returncode
-                    except subprocess.TimeoutExpired:
-                        print("❌ Octave timed out after 180s. Check /content/octave.log")
-                        rc = -1
+                        if proc.stdout:
+                            print("\n--- Octave STDOUT (tail) ---\n", proc.stdout[-2000:])
+                        if proc.stderr:
+                            print("\n--- Octave STDERR (tail) ---\n", proc.stderr[-2000:])
 
-                    # Show diary tail
+                    except subprocess.TimeoutExpired:
+                        print("❌ Octave timed out after 420s. Check /content/octave.log")
+                        rc = -1
+                    except FileNotFoundError as e:
+                        print("❌", e)
+                        rc = -2
+                    except Exception as e:
+                        print("❌ Unexpected error launching Octave:", e)
+                        rc = -3
+
+                    # Show diary tail and error file (if created by run_mcpath.m)
                     log_path = os.path.join(SAVE_DIR_REAL, "octave.log")
                     if os.path.exists(log_path):
                         try:
                             with open(log_path, "r") as lf:
                                 log = lf.read()
-                            tail = log[-2000:] if len(log) > 2000 else log
+                            tail = log[-4000:] if len(log) > 4000 else log
                             print("\n--- octave.log (tail) ---\n", tail)
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            print("WARN: could not read octave.log:", e)
+
+                    err_file = os.path.join(SAVE_DIR_REAL, "error")
+                    if os.path.exists(err_file):
+                        try:
+                            with open(err_file, "r") as ef:
+                                print("\n--- error file ---\n", ef.read()[:4000])
+                        except Exception as e:
+                            print("WARN: could not read error file:", e)
 
                     if rc != 0:
-                        err_file = os.path.join(SAVE_DIR_REAL, "error")
-                        if os.path.exists(err_file):
-                            with open(err_file, "r") as ef:
-                                print("\n--- error file ---\n", ef.read()[:2000])
                         print("❌ Octave failed. Return code:", rc)
                     else:
                         print("✅ Octave finished successfully.")
 
-            except Exception as e:
+            except Exception as e:   # <-- this 'except' closes the outer try
                 print("❌", e)
 
     btn_clear.on_click(on_clear)
