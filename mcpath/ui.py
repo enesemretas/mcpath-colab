@@ -1,15 +1,14 @@
 # mcpath/ui.py
-import os, re, requests, yaml, importlib
+import os, re, requests, yaml, importlib, threading, time
 from IPython.display import display, clear_output
 import ipywidgets as W
 
-# --- make sure widgets work in Colab ---
+# --- ensure widgets work in Colab ---
 try:
-    import google.colab  # type: ignore
     from google.colab import output as _colab_output  # type: ignore
     _colab_output.enable_custom_widget_manager()
 except Exception:
-    pass  # fine on non-Colab Jupyter
+    pass
 
 # -------------------- validators & helpers --------------------
 def _is_valid_pdb_code(c): return bool(re.fullmatch(r"[0-9A-Za-z]{4}", c.strip()))
@@ -39,7 +38,6 @@ def _list_or_custom(label: str, options, default_value, minv, maxv, step=1):
 
     def get_value():
         return int(dd.value if mode.value == "list" else txt.value)
-
     return mode, dd, txt, get_value
 
 def _logo_widget(branding: dict):
@@ -65,50 +63,58 @@ def launch(
     FN = cfg["field_names"]
     run_python_readpdb = bool(cfg.get("run_python_readpdb_after_submit", True))
 
-    # ---------- Branding ----------
     logo = _logo_widget(cfg.get("branding", {}))
 
-    # ---------- PDB: code OR single FileUpload button ----------
+    # --- PDB code OR single FileUpload button ---
     pdb_code = W.Text(value=str(cfg.get("pdb_code", "")), description="PDB code:")
     or_lbl   = W.HTML("<b>&nbsp;&nbsp;or&nbsp;&nbsp;</b>")
     file_lbl = W.Label("No file chosen")
 
     picked = {"name": None, "bytes": None}
 
-    def make_uploader():
+    def _bind_uploader(up: W.FileUpload):
+        # Robust handler for ipywidgets v7 & v8
+        def _update_from_value(v):
+            name = None; content = None
+            if isinstance(v, dict) and v:
+                name, meta = next(iter(v.items()))
+                content = meta.get("content")
+            elif isinstance(v, tuple) and v:
+                meta = v[0]
+                name = meta.get("name") or meta.get("metadata", {}).get("name")
+                content = meta.get("content")
+            if name and (content is not None):
+                picked["name"]  = name
+                picked["bytes"] = content
+                file_lbl.value  = name
+
+        def _cb(change):
+            _update_from_value(change["new"])
+        up.observe(_cb, names="value")
+
+        # Safety kicker: some Colab fronts miss the first trait event
+        def _kick():
+            time.sleep(0.15)
+            _update_from_value(up.value)
+        threading.Thread(target=_kick, daemon=True).start()
+
+    def _make_uploader():
         up = W.FileUpload(
             accept=".pdb,.ent,.txt,.gz",
             multiple=False,
             description="Choose file",
-            layout=W.Layout(width="200px")
+            layout=W.Layout(width="220px"),
         )
-        def on_change(change):
-            # ipywidgets v8: dict like {filename: {content: b'...', ...}}
-            # ipywidgets v7: tuple of dicts
-            name = None; content = None
-            v = up.value
-            if isinstance(v, dict) and v:
-                name, meta = next(iter(v.items()))
-                content = meta.get("content", None)
-            elif isinstance(v, tuple) and v:
-                meta = v[0]
-                # v7 has keys: 'name', 'type', 'size', 'content'
-                name = meta.get("name") or next(iter(meta.keys()), None)
-                content = meta.get("content")
-            if name and content is not None:
-                picked["name"]  = name
-                picked["bytes"] = content
-                file_lbl.value  = name
-        up.observe(on_change, names="value")
+        _bind_uploader(up)
         return up
 
-    pdb_upload = make_uploader()
+    pdb_upload = _make_uploader()
 
-    # ---------- Always fields ----------
+    # --- Base fields ---
     chain_id = W.Text(value=str(cfg.get("chain_id", "A")), description="Chain ID:")
     email    = W.Text(value=str(cfg.get("email", "")), description="Email (opt):")
 
-    # ---------- Prediction type ----------
+    # --- Prediction type ---
     pred_type = W.RadioButtons(
         options=[
             ("Functional Residues", "functional"),
@@ -120,7 +126,7 @@ def launch(
         layout=W.Layout(width="auto")
     )
 
-    # ---------- Functional mode ----------
+    # --- Functional mode ---
     big_opts = cfg.get("path_length_options", [100000,200000,300000,400000,500000,750000,1000000,2000000,3000000,4000000])
     big_default = int(cfg.get("path_length", big_opts[0] if big_opts else 100000))
     (pl_mode_big, pl_dd_big, pl_txt_big, get_big_len) = _list_or_custom(
@@ -128,7 +134,7 @@ def launch(
         minv=1, maxv=10_000_000, step=1000
     )
 
-    # ---------- Mode 2 ----------
+    # --- Mode 2 ---
     init_idx   = W.BoundedIntText(value=1, min=1, max=1_000_000, step=1, description="Index of initial residue")
     init_chain = W.Text(value="", description="Chain of initial residue", placeholder="A", layout=W.Layout(width="260px"))
     short_len_opts = [5, 8, 10, 13, 15, 20, 25, 30]
@@ -142,7 +148,7 @@ def launch(
         minv=1, maxv=10_000_000, step=100
     )
 
-    # ---------- Mode 3 ----------
+    # --- Mode 3 ---
     final_idx   = W.BoundedIntText(value=1, min=1, max=1_000_000, step=1, description="Index of final residue")
     final_chain = W.Text(value="", description="Chain of final residue", placeholder="B", layout=W.Layout(width="260px"))
     num_paths_opts_mode3 = [1000,2000,3000,5000,10000,30000,50000]
@@ -151,12 +157,12 @@ def launch(
         minv=1, maxv=10_000_000, step=100
     )
 
-    # ---------- Actions ----------
+    # --- Actions & output ---
     btn_submit = W.Button(description="Submit", button_style="success", icon="paper-plane")
     btn_clear  = W.Button(description="Clear",  button_style="warning", icon="trash")
     out        = W.Output()
 
-    # ---------- Layout ----------
+    # --- Layout ---
     pdb_row = W.HBox([pdb_code, W.HTML("&nbsp;"), W.HTML("<b>or</b>"), pdb_upload, file_lbl])
     functional_box = W.VBox([pl_mode_big, pl_dd_big, pl_txt_big])
     mode2_box = W.VBox([init_idx, init_chain, pl_mode_short, pl_dd_short, pl_txt_short, np_mode_2, np_dd_2, np_txt_2])
@@ -202,8 +208,8 @@ def launch(
         np_mode_2.value = "list"; np_dd_2.value = np_dd_2.options[0]; np_txt_2.value = int(np_dd_2.options[0])
         final_idx.value = 1; final_chain.value = ""
         np_mode_3.value = "list"; np_dd_3.value = np_dd_3.options[0]; np_txt_3.value = int(np_dd_3.options[0])
-        # recreate uploader, because FileUpload.value is read-only
-        new_up = make_uploader()
+        # recreate uploader because .value is read-only
+        new_up = _make_uploader()
         pdb_row.children = [pdb_code, W.HTML("&nbsp;"), W.HTML("<b>or</b>"), new_up, file_lbl]
         pdb_upload = new_up
         with out: clear_output()
