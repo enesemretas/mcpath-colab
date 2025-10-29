@@ -3,6 +3,14 @@ import os, re, requests, yaml, importlib
 from IPython.display import display, clear_output
 import ipywidgets as W
 
+# --- make sure widgets work in Colab ---
+try:
+    import google.colab  # type: ignore
+    from google.colab import output as _colab_output  # type: ignore
+    _colab_output.enable_custom_widget_manager()
+except Exception:
+    pass  # fine on non-Colab Jupyter
+
 # -------------------- validators & helpers --------------------
 def _is_valid_pdb_code(c): return bool(re.fullmatch(r"[0-9A-Za-z]{4}", c.strip()))
 def _is_valid_chain(ch):   return bool(re.fullmatch(r"[A-Za-z0-9]", ch.strip()))
@@ -65,19 +73,18 @@ def launch(
     or_lbl   = W.HTML("<b>&nbsp;&nbsp;or&nbsp;&nbsp;</b>")
     file_lbl = W.Label("No file chosen")
 
-    # state for selected upload
     picked = {"name": None, "bytes": None}
 
     def make_uploader():
         up = W.FileUpload(
-            accept=".pdb",
+            accept=".pdb,.ent,.txt,.gz",
             multiple=False,
             description="Choose file",
             layout=W.Layout(width="200px")
         )
         def on_change(change):
-            # ipywidgets v8 returns dict-like {filename: {content: b'...', ...}}
-            # older might return a tuple of dicts; handle both robustly.
+            # ipywidgets v8: dict like {filename: {content: b'...', ...}}
+            # ipywidgets v7: tuple of dicts
             name = None; content = None
             v = up.value
             if isinstance(v, dict) and v:
@@ -85,6 +92,7 @@ def launch(
                 content = meta.get("content", None)
             elif isinstance(v, tuple) and v:
                 meta = v[0]
+                # v7 has keys: 'name', 'type', 'size', 'content'
                 name = meta.get("name") or next(iter(meta.keys()), None)
                 content = meta.get("content")
             if name and content is not None:
@@ -194,7 +202,7 @@ def launch(
         np_mode_2.value = "list"; np_dd_2.value = np_dd_2.options[0]; np_txt_2.value = int(np_dd_2.options[0])
         final_idx.value = 1; final_chain.value = ""
         np_mode_3.value = "list"; np_dd_3.value = np_dd_3.options[0]; np_txt_3.value = int(np_dd_3.options[0])
-        # recreate the uploader (FileUpload.value is read-only)
+        # recreate uploader, because FileUpload.value is read-only
         new_up = make_uploader()
         pdb_row.children = [pdb_code, W.HTML("&nbsp;"), W.HTML("<b>or</b>"), new_up, file_lbl]
         pdb_upload = new_up
