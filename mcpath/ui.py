@@ -1,19 +1,17 @@
 # mcpath/ui.py
-import os, re, requests, yaml, importlib
+# UI-only front end for MCPath + Python-based readpdb_strict integration.
+# - Single "Choose & Upload" button (Colab) with hidden sink: no extra bottom block.
+# - Optional local processing via readpdb_strict if available: writes <pdb>.cor.
+# - Same form/fields as before (functional / paths modes).
+
+import os, re, io, yaml, requests
 from IPython.display import display, clear_output
 import ipywidgets as W
 
-# Enable widget manager in Colab (no-op elsewhere)
-try:
-    from google.colab import output as _colab_output  # type: ignore
-    _colab_output.enable_custom_widget_manager()
-except Exception:
-    pass
-
 # -------------------- validators & helpers --------------------
-def _is_valid_pdb_code(c): return bool(re.fullmatch(r"[0-9A-Za-z]{4}", c.strip()))
-def _is_valid_chain(ch):   return bool(re.fullmatch(r"[A-Za-z0-9]", ch.strip()))
-def _is_valid_email(s):    return (not s.strip()) or bool(re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", s.strip()))
+def _is_valid_pdb_code(c): return bool(re.fullmatch(r"[0-9A-Za-z]{4}", (c or "").strip()))
+def _is_valid_chain(ch):   return bool(re.fullmatch(r"[A-Za-z0-9]", (ch or "").strip()))
+def _is_valid_email(s):    return (not (s or "").strip()) or bool(re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", s.strip()))
 
 def _fetch_rcsb(code: str) -> bytes:
     url = f"https://files.rcsb.org/download/{code.upper()}.pdb"
@@ -21,24 +19,35 @@ def _fetch_rcsb(code: str) -> bytes:
     return r.content
 
 def _list_or_custom(label: str, options, default_value, minv, maxv, step=1):
+    """Factory for a (List|Custom) toggle + Dropdown + BoundedIntText trio."""
     options = sorted({int(x) for x in options})
     default_value = int(default_value)
     if default_value not in options:
         options = sorted(options + [default_value])
+
     mode = W.ToggleButtons(options=[("List","list"), ("Custom","custom")], value="list", description="Input:")
-    dd   = W.Dropdown(options=options, value=default_value, description=label)
-    txt  = W.BoundedIntText(value=default_value, min=minv, max=maxv, step=step, description=label)
+    dd   = W.Dropdown(options=options, value=default_value, description=label, layout=W.Layout(width="350px"))
+    txt  = W.BoundedIntText(value=default_value, min=minv, max=maxv, step=step, description=label, layout=W.Layout(width="350px"))
+
     def _sync(*_):
-        dd.layout.display  = "" if mode.value == "list" else "none"
-        txt.layout.display = "none" if mode.value == "list" else ""
+        if mode.value == "list":
+            dd.layout.display = ""
+            txt.layout.display = "none"
+        else:
+            dd.layout.display = "none"
+            txt.layout.display = ""
     _sync()
     mode.observe(_sync, names="value")
-    def get_value(): return int(dd.value if mode.value == "list" else txt.value)
+
+    def get_value():
+        return int(dd.value if mode.value == "list" else txt.value)
+
     return mode, dd, txt, get_value
 
 def _logo_widget(branding: dict):
     url = (branding.get("logo_url") or "").strip()
-    if not url: return None
+    if not url:
+        return None
     height = int(branding.get("logo_height", 96))
     align  = (branding.get("logo_align") or "center").lower()
     try:
@@ -49,56 +58,113 @@ def _logo_widget(branding: dict):
     except Exception:
         return None
 
+# -------------------- optional integration with readpdb_strict --------------------
+def _try_run_readpdb_strict(saved_path: str, chain_id: str, out_widget: W.Output):
+    """
+    If mcpath/readpdb_strict.py is present and exposes a run() or readpdb()/run_readpdb(),
+    call it to generate <pdb>.cor and briefly summarize the rows written.
+    """
+    try:
+        import importlib
+        m = importlib.import_module("mcpath.readpdb_strict")
+    except Exception:
+        with out_widget:
+            print("ℹ️ readpdb_strict module not found; skipping local processing.")
+        return
+
+    func = None
+    for name in ("run", "run_readpdb", "readpdb"):
+        f = getattr(m, name, None)
+        if callable(f):
+            func = f
+            break
+
+    if func is None:
+        with out_widget:
+            print("ℹ️ readpdb_strict has no callable (run/run_readpdb/readpdb); skipping.")
+        return
+
+    # Try to run and summarize
+    try:
+        with out_widget:
+            print("▶ Running readpdb_strict …")
+        # Most variants accept (pdb_path, chain_id) or (ProteinName, chainID)
+        try:
+            func(saved_path, chain_id)
+        except TypeError:
+            func(ProteinName=saved_path, chainID=chain_id)
+
+        cor_path = os.path.splitext(saved_path)[0] + ".cor"
+        nrows = 0
+        if os.path.exists(cor_path):
+            # Count lines (fast)
+            with open(cor_path, "r") as f:
+                for _ in f:
+                    nrows += 1
+        with out_widget:
+            if os.path.exists(cor_path):
+                print(f"✅ Wrote: {cor_path}  (rows: {nrows})")
+            else:
+                print("⚠️ readpdb_strict ran but no .cor file was found.")
+    except Exception as e:
+        with out_widget:
+            print("❌ readpdb_strict error:", e)
+
 # -------------------- main UI --------------------
 def launch(
     defaults_url="https://raw.githubusercontent.com/enesemretas/mcpath-colab/main/config/defaults.yaml",
     show_title="MCPath (Python readpdb)"
 ):
+    """Launch the MCPath parameter form (UI only, Python reader)."""
     cfg = yaml.safe_load(requests.get(defaults_url, timeout=30).text)
     target_url = (cfg.get("target_url") or "").strip()
     FN = cfg["field_names"]
-    run_python_readpdb = bool(cfg.get("run_python_readpdb_after_submit", True))
 
+    # ---------- Branding / logo ----------
     logo = _logo_widget(cfg.get("branding", {}))
 
-    # ---------- PDB: code OR single "Choose & Upload" button ----------
-    pdb_code = W.Text(value=str(cfg.get("pdb_code", "")), description="PDB code:")
-    or_lbl   = W.HTML("<b>&nbsp;&nbsp;or&nbsp;&nbsp;</b>")
+    # ---------- PDB code + single 'Choose & Upload' button ----------
+    pdb_code   = W.Text(value=str(cfg.get("pdb_code", "")), description="PDB code:", layout=W.Layout(width="470px"))
+    or_lbl     = W.HTML("<b>&nbsp;&nbsp;or&nbsp;&nbsp;</b>")
 
-    btn_pick = W.Button(
-        description="Choose & Upload",
-        icon="upload",
-        layout=W.Layout(width="220px"),
-        tooltip="Open file picker and upload"
-    )
-    file_lbl = W.Label("No file chosen")
-
+    btn_choose_upload = W.Button(description="Choose & Upload", icon="upload", layout=W.Layout(width="260px"))
+    file_lbl          = W.Label("No file chosen")
     picked = {"name": None, "bytes": None, "saved_path": None}
 
+    # Hidden capture for Colab upload UI
+    upload_sink = W.Output(layout=W.Layout(display='none'))
+
     def choose_and_upload(_=None):
-        """Open file dialog and upload (Colab’s native uploader)."""
+        # Use Colab uploader; hide its bottom UI inside upload_sink
         try:
-            from google.colab import files  # type: ignore
+            from google.colab import files  # only available on Colab
         except Exception:
-            raise RuntimeError("This one-click upload requires Google Colab. (No ipywidgets FileUpload here.)")
-        res = files.upload()  # opens dialog; returns dict{name: bytes}
+            with out:
+                print("❌ The one-click uploader works only on Google Colab.")
+            return
+        with upload_sink:
+            res = files.upload()
+            clear_output()   # hide Colab's native status block
+
         if not res:
             file_lbl.value = "No file chosen"
-            picked["name"] = None; picked["bytes"] = None; picked["saved_path"] = None
+            picked.update(name=None, bytes=None, saved_path=None)
             return
-        # take first file only
+
         name, content = next(iter(res.items()))
+        # Normalize .pdb extension
+        if not name.lower().endswith(".pdb"):
+            name = os.path.splitext(name)[0] + ".pdb"
         with open(name, "wb") as f:
             f.write(content)
-        picked["name"] = name
-        picked["bytes"] = content
-        picked["saved_path"] = os.path.join(os.getcwd(), name)
+        picked.update(name=name, bytes=content, saved_path=os.path.join(os.getcwd(), name))
         file_lbl.value = f"{name} (uploaded)"
-    btn_pick.on_click(choose_and_upload)
+
+    btn_choose_upload.on_click(choose_and_upload)
 
     # ---------- Always-present fields ----------
-    chain_id = W.Text(value=str(cfg.get("chain_id", "A")), description="Chain ID:")
-    email    = W.Text(value=str(cfg.get("email", "")), description="Email (opt):")
+    chain_id   = W.Text(value=str(cfg.get("chain_id", "A")), description="Chain ID:", layout=W.Layout(width="350px"))
+    email      = W.Text(value=str(cfg.get("email", "")), description="Email (opt):", layout=W.Layout(width="350px"))
 
     # ---------- Prediction type ----------
     pred_type = W.RadioButtons(
@@ -112,62 +178,78 @@ def launch(
         layout=W.Layout(width="auto")
     )
 
-    # ---------- Functional mode ----------
-    big_opts = cfg.get("path_length_options", [100000,200000,300000,400000,500000,750000,1000000,2000000,3000000,4000000])
+    # ---------- Functional mode: big path_length (YAML-driven List/Custom) ----------
+    big_opts = cfg.get("path_length_options", [
+        100000, 200000, 300000, 400000, 500000, 750000,
+        1000000, 2000000, 3000000, 4000000
+    ])
     big_default = int(cfg.get("path_length", big_opts[0] if big_opts else 100000))
     (pl_mode_big, pl_dd_big, pl_txt_big, get_big_len) = _list_or_custom(
         label="Path length:", options=big_opts, default_value=big_default,
         minv=1, maxv=10_000_000, step=1000
     )
 
-    # ---------- Mode 2 ----------
-    init_idx   = W.BoundedIntText(value=1, min=1, max=1_000_000, step=1, description="Index of initial residue")
-    init_chain = W.Text(value="", description="Chain of initial residue", placeholder="A", layout=W.Layout(width="260px"))
-    short_len_opts = [5,8,10,13,15,20,25,30]
+    # ---------- Mode 2: initial residue + short path length + number of paths ----------
+    init_idx   = W.BoundedIntText(value=1, min=1, max=1_000_000, step=1, description="Index of initial residue", layout=W.Layout(width="350px"))
+    init_chain = W.Text(value="", description="Chain of initial residue", placeholder="A", layout=W.Layout(width="350px"))
+
+    short_len_opts = [5, 8, 10, 13, 15, 20, 25, 30]
     (pl_mode_short, pl_dd_short, pl_txt_short, get_short_len) = _list_or_custom(
         label="Length of Paths:", options=short_len_opts, default_value=5,
         minv=1, maxv=10_000, step=1
     )
-    num_paths_opts_mode2 = [1000,2000,3000,5000,10000,20000,30000,40000,50000]
+
+    num_paths_opts_mode2 = [1000, 2000, 3000, 5000, 10000, 20000, 30000, 40000, 50000]
     (np_mode_2, np_dd_2, np_txt_2, get_num_paths_2) = _list_or_custom(
         label="Number of Paths:", options=num_paths_opts_mode2, default_value=1000,
         minv=1, maxv=10_000_000, step=100
     )
 
-    # ---------- Mode 3 ----------
-    final_idx   = W.BoundedIntText(value=1, min=1, max=1_000_000, step=1, description="Index of final residue")
-    final_chain = W.Text(value="", description="Chain of final residue", placeholder="B", layout=W.Layout(width="260px"))
-    num_paths_opts_mode3 = [1000,2000,3000,5000,10000,30000,50000]
+    # ---------- Mode 3: initial & final residues + number of paths ----------
+    final_idx   = W.BoundedIntText(value=1, min=1, max=1_000_000, step=1, description="Index of final residue", layout=W.Layout(width="350px"))
+    final_chain = W.Text(value="", description="Chain of final residue", placeholder="B", layout=W.Layout(width="350px"))
+
+    num_paths_opts_mode3 = [1000, 2000, 3000, 5000, 10000, 30000, 50000]
     (np_mode_3, np_dd_3, np_txt_3, get_num_paths_3) = _list_or_custom(
         label="Number of Paths:", options=num_paths_opts_mode3, default_value=1000,
         minv=1, maxv=10_000_000, step=100
     )
 
     # ---------- Actions & output ----------
-    btn_submit = W.Button(description="Submit", button_style="success", icon="paper-plane")
-    btn_clear  = W.Button(description="Clear",  button_style="warning", icon="trash")
+    btn_submit = W.Button(description="Submit", button_style="success", icon="paper-plane", layout=W.Layout(width="240px"))
+    btn_clear  = W.Button(description="Clear",  button_style="warning", icon="trash",       layout=W.Layout(width="180px"))
     out        = W.Output()
 
-    # ---------- Layout ----------
-    pdb_row = W.HBox([pdb_code, W.HTML("&nbsp;"), W.HTML("<b>or</b>"),
-                      btn_pick, W.HTML("&nbsp;"), file_lbl],
-                     layout=W.Layout(align_items="center"))
+    # ---------- Grouped layouts per section ----------
+    pdb_row = W.HBox([pdb_code, W.HTML("&nbsp;"), or_lbl, btn_choose_upload, W.HTML("&nbsp;"), file_lbl])
 
     functional_box = W.VBox([pl_mode_big, pl_dd_big, pl_txt_big])
-    mode2_box = W.VBox([init_idx, init_chain, pl_mode_short, pl_dd_short, pl_txt_short, np_mode_2, np_dd_2, np_txt_2])
-    mode3_box = W.VBox([init_idx, init_chain, final_idx, final_chain, np_mode_3, np_dd_3, np_txt_3])
+    mode2_box = W.VBox([
+        init_idx, init_chain,
+        pl_mode_short, pl_dd_short, pl_txt_short,
+        np_mode_2, np_dd_2, np_txt_2
+    ])
+    mode3_box = W.VBox([
+        init_idx, init_chain,
+        final_idx, final_chain,
+        np_mode_3, np_dd_3, np_txt_3
+    ])
 
     def _sync_mode(*_):
         functional_box.layout.display = ""
         mode2_box.layout.display = "none"
         mode3_box.layout.display = "none"
         if pred_type.value == "paths_init_len":
-            functional_box.layout.display = "none"; mode2_box.layout.display = ""
+            functional_box.layout.display = "none"
+            mode2_box.layout.display = ""
         elif pred_type.value == "paths_init_final":
-            functional_box.layout.display = "none"; mode3_box.layout.display = ""
+            functional_box.layout.display = "none"
+            mode2_box.layout.display = "none"
+            mode3_box.layout.display = ""
     _sync_mode()
     pred_type.observe(_sync_mode, names="value")
 
+    # ---------- Render the full UI ----------
     children = []
     if logo: children.append(logo)
     children += [
@@ -175,10 +257,14 @@ def launch(
         pdb_row,
         W.HTML("<b>Prediction of:</b>"),
         pred_type,
-        functional_box, mode2_box, mode3_box,
+        functional_box,
+        mode2_box,
+        mode3_box,
         chain_id, email,
         W.HBox([btn_submit, btn_clear]),
-        W.HTML("<hr>"), out
+        W.HTML("<hr>"),
+        out,
+        upload_sink,  # invisible; captures Colab upload UI
     ]
     display(W.VBox(children))
 
@@ -186,72 +272,56 @@ def launch(
     def on_clear(_):
         pdb_code.value = ""
         file_lbl.value = "No file chosen"
-        picked["name"] = None; picked["bytes"] = None; picked["saved_path"] = None
-        chain_id.value = str(cfg.get("chain_id","A"))
+        picked.update(name=None, bytes=None, saved_path=None)
+        chain_id.value = "A"
         email.value = ""
         pred_type.value = "functional"
-        pl_mode_big.value = "list"; pl_dd_big.value = pl_dd_big.options[0]; pl_txt_big.value = int(pl_dd_big.options[0])
+        # reset mode widgets
+        pl_mode_big.value = "list"
+        pl_dd_big.value = pl_dd_big.options[0]
+        pl_txt_big.value = int(pl_dd_big.options[0])
+
         init_idx.value = 1; init_chain.value = ""
         pl_mode_short.value = "list"; pl_dd_short.value = pl_dd_short.options[0]; pl_txt_short.value = int(pl_dd_short.options[0])
         np_mode_2.value = "list"; np_dd_2.value = np_dd_2.options[0]; np_txt_2.value = int(np_dd_2.options[0])
+
         final_idx.value = 1; final_chain.value = ""
         np_mode_3.value = "list"; np_dd_3.value = np_dd_3.options[0]; np_txt_3.value = int(np_dd_3.options[0])
         with out: clear_output()
 
-    def _collect_pdb_bytes():
-        if picked["bytes"] is not None:
-            return picked["bytes"], picked["name"], picked["saved_path"]
+    def _collect_pdb_bytes_and_name():
+        # Priority: uploaded file -> RCSB code
+        if picked["bytes"] is not None and picked["name"]:
+            return picked["bytes"], picked["name"]
         code = pdb_code.value.strip()
         if not _is_valid_pdb_code(code):
-            raise ValueError("PDB code must be exactly 4 alphanumeric characters (or click 'Choose & Upload').")
-        data = _fetch_rcsb(code)
-        path = os.path.join(os.getcwd(), f"{code.upper()}.pdb")
-        with open(path, "wb") as f: f.write(data)
-        return data, f"{code.upper()}.pdb", path
-
-    def _run_python_readpdb(saved_path: str, chain: str):
-        try:
-            from mcpath import readpdb_strict as rps
-            importlib.reload(rps)
-        except Exception as e:
-            print("ℹ️ readpdb_strict import failed:", e); return None
-        if not hasattr(rps, "run") or not callable(rps.run):
-            print("ℹ️ readpdb_strict has no callable (run) — skipping."); return None
-        try:
-            return rps.run(saved_path, chain, strict_matlab_mode=True)
-        except Exception as e:
-            print("❌ readpdb_strict.run failed:", e); return None
+            raise ValueError("PDB code must be exactly 4 alphanumeric characters (or use Choose & Upload).")
+        return _fetch_rcsb(code), f"{code.upper()}.pdb"
 
     def on_submit(_):
         with out:
             clear_output()
             try:
+                # basic validation
                 chain_global = chain_id.value.strip()
                 if not _is_valid_chain(chain_global):
                     raise ValueError("Chain ID must be a single character (e.g., A).")
                 if not _is_valid_email(email.value.strip()):
                     raise ValueError("Invalid email format.")
 
-                pdb_bytes, pdb_name, save_path = _collect_pdb_bytes()
-                print(f"Saved local copy: {save_path}")
+                pdb_bytes, pdb_name = _collect_pdb_bytes_and_name()
 
-                cor_path = None
-                if run_python_readpdb:
-                    cor_path = _run_python_readpdb(save_path, chain_global)
-                    if cor_path and os.path.exists(cor_path):
-                        print(f"✅ Created: {cor_path}")
-                        try:
-                            with open(cor_path, "r") as cf:
-                                head = "".join([next(cf) for _ in range(5)])
-                            print("\n--- .cor (first 5 lines) ---\n" + head)
-                        except Exception:
-                            pass
+                # build payload
+                data = {
+                    "prediction_mode": pred_type.value,
+                    FN["chain_id"]: chain_global,
+                }
+                if pdb_code.value.strip():
+                    data[FN["pdb_code"]] = pdb_code.value.strip().upper()
+                if email.value.strip():
+                    data[FN["email"]] = email.value.strip()
 
-                data = {"prediction_mode": pred_type.value, FN["chain_id"]: chain_global}
-                if pdb_code.value.strip(): data[FN["pdb_code"]] = pdb_code.value.strip().upper()
-                if email.value.strip():    data[FN["email"]]    = email.value.strip()
-                files = {FN["pdb_file"]: (pdb_name, pdb_bytes, "chemical/x-pdb")}
-
+                # mode-specific fields
                 if pred_type.value == "functional":
                     data[FN["path_length"]] = str(get_big_len())
                 elif pred_type.value == "paths_init_len":
@@ -276,16 +346,32 @@ def launch(
                         "number_paths":  int(get_num_paths_3()),
                     })
 
-                if not target_url:
-                    print("\n(No target_url set) — preview only payload below:\n")
-                    preview = dict(data); preview["attached_file"] = pdb_name
-                    print(preview); return
+                # Save a local copy of the PDB for the user
+                with open(pdb_name, "wb") as f:
+                    f.write(pdb_bytes)
+                saved_path = os.path.join(os.getcwd(), pdb_name)
+                print(f"Saved local copy: {saved_path}")
 
+                # Try local processing via readpdb_strict
+                _try_run_readpdb_strict(saved_path, chain_global, out)
+
+                if not target_url:
+                    # preview only
+                    print("\n(No target_url set) — preview only payload below:\n")
+                    preview = dict(data)
+                    preview["attached_file"] = pdb_name
+                    print(preview)
+                    return
+
+                # real POST
                 print(f"Submitting to {target_url} …")
+                files = {FN["pdb_file"]: (pdb_name, pdb_bytes, "chemical/x-pdb")}
                 r = requests.post(target_url, data=data, files=files, timeout=180)
                 print("HTTP", r.status_code)
-                try:    print("JSON:", r.json())
-                except Exception: print("Response (≤800 chars):\n", r.text[:800])
+                try:
+                    print("JSON:", r.json())
+                except Exception:
+                    print("Response (≤800 chars):\n", r.text[:800])
 
             except Exception as e:
                 print("❌", e)
