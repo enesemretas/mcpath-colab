@@ -5,7 +5,7 @@ target_url: ""
 save_dir: "/content"
 
 # Form defaults (optional)
-pdb_code: ""
+pdb_code: "4CFR"
 chain_id: "A"
 email: ""
 
