@@ -6,18 +6,64 @@ import ipywidgets as W
 # -------------------- Octave availability helper --------------------
 def _ensure_octave_and_pick_cmd(install_timeout=300):
     """
-    Return the octave executable to use ('octave' or 'octave-cli').
-    If neither exists and we're in Colab (/content), attempt apt-get install.
+    Return a usable Octave executable.
+    Resolution order:
+      1) $OCTAVE_CMD env var
+      2) PATH: octave, then octave-cli
+      3) Common platform paths (Windows/macOS/Linux)
+      4) Colab auto-install (apt-get) when running under /content
+    Raises FileNotFoundError if nothing is found/installed.
     """
-    cand = shutil.which("octave") or shutil.which("octave-cli")
+    import platform
+
+    # 1) Allow explicit override
+    override = os.environ.get("OCTAVE_CMD", "").strip()
+    if override and shutil.which(override):
+        return shutil.which(override)
+
+    # 2) PATH lookup
+    cand = shutil.which("octave") or shutil.which("octave-cli") or shutil.which("octave-cli.exe")
     if cand:
         return cand
 
-    # Attempt best-effort install on Colab
-    in_colab = os.path.isdir("/content")
+    # 3) Common install locations by OS
+    sysname = platform.system().lower()
+    candidates = []
+
+    if sysname == "windows":
+        candidates += [
+            r"C:\Octave\Octave-9.1.0\mingw64\bin\octave-cli.exe",
+            r"C:\Octave\Octave-8.4.0\mingw64\bin\octave-cli.exe",
+            r"C:\Program Files\GNU Octave\Octave-9.1.0\mingw64\bin\octave-cli.exe",
+            r"C:\Program Files\GNU Octave\Octave-8.4.0\mingw64\bin\octave-cli.exe",
+        ]
+    elif sysname == "darwin":
+        # Homebrew and app bundle CLI shims
+        candidates += [
+            "/opt/homebrew/bin/octave",        # Apple Silicon
+            "/usr/local/bin/octave",           # Intel mac
+            "/Applications/Octave.app/Contents/Resources/usr/bin/octave-cli",
+        ]
+    else:
+        # Linux typical paths (including conda)
+        candidates += [
+            "/usr/bin/octave", "/usr/local/bin/octave",
+            "/usr/bin/octave-cli", "/usr/local/bin/octave-cli",
+            # conda-forge (common prefixes)
+            os.path.expanduser("~/.conda/envs/base/bin/octave"),
+            os.path.expanduser("~/.mambaforge/bin/octave"),
+            os.path.expanduser("~/.miniforge3/bin/octave"),
+        ]
+
+    for p in candidates:
+        if os.path.exists(p):
+            return p
+
+    # 4) Best-effort auto-install on Colab only
+    in_colab = os.path.isdir("/content") and os.path.exists("/usr/bin/apt-get")
     if in_colab:
         try:
-            print("⚙️ Octave not found — installing via apt-get (this may take a minute)…")
+            print("⚙️ Octave not found — installing via apt-get (this may take a couple of minutes)…")
             subprocess.run(["apt-get", "update", "-qq"], check=True, text=True)
             subprocess.run(
                 ["apt-get", "install", "-y", "-qq", "octave", "gnuplot"],
@@ -28,10 +74,17 @@ def _ensure_octave_and_pick_cmd(install_timeout=300):
                 print("✅ Octave installed:", cand)
                 return cand
         except Exception as e:
-            print("❌ Failed to auto-install Octave:", e)
+            print("❌ Failed to auto-install Octave on Colab:", e)
 
+    # Nothing worked
     raise FileNotFoundError(
-        "Octave executable not found. Please install GNU Octave (e.g., `apt-get install octave`)."
+        "Octave executable not found.\n"
+        "Install it and/or set OCTAVE_CMD to the full path.\n"
+        "Quick install tips:\n"
+        "  • Ubuntu/Debian:   sudo apt-get update && sudo apt-get install -y octave gnuplot\n"
+        "  • macOS (Homebrew): brew install octave\n"
+        "  • Windows (winget): winget install -e --id GNU.Octave   (or: choco install octave)\n"
+        "  • Conda/Mamba:     conda install -c conda-forge octave gnuplot"
     )
 
 # -------------------- Octave pdbreader shim (fallback) --------------------
@@ -287,7 +340,11 @@ def launch(
     # -------------------- handlers --------------------
     def on_clear(_):
         pdb_code.value = ""
-        pdb_upload.value.clear()
+        # More robust reset for FileUpload (clear() may not exist in some versions)
+        try:
+            pdb_upload.value.clear()
+        except Exception:
+            pdb_upload.value = {}
         file_lbl.value = "No file chosen"
         chain_id.value = ""
         email.value = ""
@@ -505,7 +562,7 @@ end
                         octave_cmd = _ensure_octave_and_pick_cmd()
                         cd_escaped = SAVE_DIR_REAL.replace("'", "''")
                         proc = subprocess.run(
-                            [octave_cmd, "-qf", "--eval", f"cd('{cd_escaped}'); run('run_mcpath.m');"],
+                            [octave_cmd, "-qf", "--no-gui", "--eval", f"cd('{cd_escaped}'); run('run_mcpath.m');"],
                             text=True, timeout=180
                         )
                         rc = proc.returncode
