@@ -38,7 +38,7 @@ field_names:
   email: "email"
 
 # Runner controls
-run_octave_after_submit: true
+run_python_readpdb_after_submit: true
 
 # If your readpdb.m lives in your repo at this path, the UI will copy it automatically:
 #   /content/mcpath-colab/matlab/readpdb.m
