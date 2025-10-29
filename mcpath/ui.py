@@ -1,159 +1,38 @@
 # mcpath/ui.py
-import os, re, requests, yaml, subprocess, shutil, sys, glob, shlex
+import os, re, requests, yaml, subprocess, shutil, sys
 from IPython.display import display, clear_output
 import ipywidgets as W
 
-# ======================= SMART OCTAVE ENSURER (Colab + Drive cache + apt + micromamba) =======================
-def _run(cmd, **kw):
-    print("$", " ".join(cmd))
-    return subprocess.run(cmd, check=True, text=True, **kw)
-
-def _which_octave():
-    return shutil.which("octave") or shutil.which("octave-cli")
-
-def _mount_drive_if_colab():
-    """Mount Google Drive if running on Colab and not mounted."""
-    if not os.path.isdir("/content"):
-        return False  # not Colab
-    try:
-        # If google.colab is importable, we are on Colab
-        from google.colab import drive  # type: ignore
-        # Check if already mounted
-        if not os.path.isdir("/content/drive"):
-            drive.mount("/content/drive", force_remount=False)
-        else:
-            # attempt a cheap access; if fails, re-mount
-            try:
-                _ = os.listdir("/content/drive")
-            except Exception:
-                drive.mount("/content/drive", force_remount=True)
-        return True
-    except Exception:
-        return False
-
-def _try_install_from_drive_cache(cache_dir="/content/drive/MyDrive/octave_debs"):
-    """Install Octave from cached .deb files in Drive, if present."""
-    if not os.path.isdir(cache_dir):
-        print(f"Drive cache directory not found: {cache_dir}")
-        return False
-    debs = sorted(glob.glob(os.path.join(cache_dir, "*.deb")))
-    if not debs:
-        print(f"No .deb files in Drive cache: {cache_dir}")
-        return False
-    try:
-        _run(["dpkg", "-i", *debs])
-    except subprocess.CalledProcessError:
-        # Resolve missing deps (may fetch a few packages)
-        _run(["apt-get", "-f", "install", "-y", "-qq"])
-    exe = _which_octave()
-    if exe:
-        print("✅ Octave installed from Drive cache:", exe)
-        return True
-    print("❌ Octave still not found after Drive cache install.")
-    return False
-
-def _build_or_refresh_drive_cache(cache_dir="/content/drive/MyDrive/octave_debs"):
-    """Copy system APT .debs to Drive cache for future fast installs."""
-    if not os.path.isdir("/content"):
-        return  # non-Colab, skip
-    os.makedirs(cache_dir, exist_ok=True)
-    try:
-        _run(["apt-get", "update", "-qq"])
-        # Re-download only to ensure the cache has the exact versions
-        _run(["apt-get", "install", "--reinstall", "-y", "-qq", "--download-only", "octave", "gnuplot"])
-        # Copy .debs
-        archives = "/var/cache/apt/archives"
-        debs = [os.path.join(archives, f) for f in os.listdir(archives) if f.endswith(".deb")]
-        if debs:
-            _run(["bash", "-lc", f"cp -v {archives}/*.deb '{cache_dir}/'"])
-            print(f"📦 Cached {len(debs)} .deb files to {cache_dir}")
-    except Exception as e:
-        print("WARN: could not refresh Drive cache:", e)
-
-def _try_install_via_apt(install_timeout=300):
-    """Install Octave using apt-get (Colab/Ubuntu)."""
-    try:
-        _run(["apt-get", "update", "-qq"])
-        _run(["apt-get", "install", "-y", "-qq", "octave", "gnuplot"], timeout=install_timeout)
-        exe = _which_octave()
-        if exe:
-            print("✅ Octave installed via apt:", exe)
-            return True
-    except Exception as e:
-        print("❌ apt-get path failed:", e)
-    return False
-
-def _try_install_via_micromamba():
-    """Micromamba fallback (creates env /usr/local/micromamba/envs/oct). Returns an executable shim if success."""
-    try:
-        print("⚙️ Setting up Octave via micromamba (conda-forge)…")
-        mamba_root = "/usr/local/micromamba"
-        env_name = "oct"
-        mamba_bin = f"{mamba_root}/bin/micromamba"
-
-        if not os.path.exists(mamba_bin):
-            _run(["bash", "-lc",
-                  "wget -qO- https://micro.mamba.pm/api/micromamba/linux-64/latest | "
-                  "tar -xvj bin/micromamba >/dev/null 2>&1 || true"])
-            os.makedirs(f"{mamba_root}/bin", exist_ok=True)
-            _run(["bash", "-lc", f"mv -f bin/micromamba {mamba_root}/bin/"])
-
-        env_prefix = f"{mamba_root}/envs/{env_name}"
-        if not os.path.isdir(env_prefix):
-            _run(["bash", "-lc", f"{mamba_bin} create -y -n {env_name} -c conda-forge octave gnuplot >/dev/null 2>&1 || true"])
-
-        exe = shutil.which("octave") or shutil.which("octave-cli")
-        # Even if system octave absent, we can run through micromamba
-        shim = f"{mamba_bin} run -n {env_name} octave"
-        print("✅ Micromamba octave shim ready.")
-        return shim
-    except Exception as e:
-        print("❌ micromamba path failed:", e)
-        return None
-
-def ensure_octave_smart(
-    drive_cache_dir="/content/drive/MyDrive/octave_debs",
-    install_timeout=300,
-    allow_micromamba=True
-):
+# -------------------- Octave availability helper --------------------
+def _ensure_octave_and_pick_cmd(install_timeout=300):
     """
-    Smart installer:
-      1) If octave exists, return it.
-      2) If Colab: mount Drive.
-      3) Try Drive cache dpkg install.
-      4) If not installed, apt-get install; then refresh Drive cache.
-      5) If still not installed (or not Colab), try micromamba.
-      6) Return the path (or shim) to run octave. Raises if all fail.
+    Return the octave executable to use ('octave' or 'octave-cli').
+    If neither exists and we're in Colab (/content), attempt apt-get install.
     """
-    exe = _which_octave()
-    if exe:
-        print("✅ Found Octave:", exe)
-        return exe
+    cand = shutil.which("octave") or shutil.which("octave-cli")
+    if cand:
+        return cand
 
+    # Attempt best-effort install on Colab
     in_colab = os.path.isdir("/content")
-    mounted = _mount_drive_if_colab() if in_colab else False
+    if in_colab:
+        try:
+            print("⚙️ Octave not found — installing via apt-get (this may take a minute)…")
+            subprocess.run(["apt-get", "update", "-qq"], check=True, text=True)
+            subprocess.run(
+                ["apt-get", "install", "-y", "-qq", "octave", "gnuplot"],
+                check=True, text=True, timeout=install_timeout
+            )
+            cand = shutil.which("octave") or shutil.which("octave-cli")
+            if cand:
+                print("✅ Octave installed:", cand)
+                return cand
+        except Exception as e:
+            print("❌ Failed to auto-install Octave:", e)
 
-    # Try Drive cache
-    if in_colab and mounted and _try_install_from_drive_cache(drive_cache_dir):
-        exe = _which_octave()
-        if exe:
-            return exe
-
-    # Try apt-get and then refresh cache for future speed
-    if _try_install_via_apt(install_timeout=install_timeout):
-        exe = _which_octave()
-        if exe:
-            if in_colab and mounted:
-                _build_or_refresh_drive_cache(drive_cache_dir)
-            return exe
-
-    # Micromamba fallback
-    if allow_micromamba:
-        shim = _try_install_via_micromamba()
-        if shim:
-            return shim
-
-    raise FileNotFoundError("GNU Octave not available. Tried PATH, Drive cache, apt-get, and micromamba.")
+    raise FileNotFoundError(
+        "Octave executable not found. Please install GNU Octave (e.g., `apt-get install octave`)."
+    )
 
 # -------------------- Octave pdbreader shim (fallback) --------------------
 # Only used if you don't supply a real pdbreader.m via cfg['pdbreader_url'].
@@ -204,6 +83,10 @@ def _fetch_rcsb(code: str) -> bytes:
     return r.content
 
 def _list_or_custom(label: str, options, default_value, minv, maxv, step=1, desc_style=None):
+    """
+    Switchable input: either a Dropdown (List) or a BoundedIntText (Custom).
+    Returns (mode_toggle, container_box, dropdown_widget, int_text_widget, get_value_fn).
+    """
     options = sorted({int(x) for x in options})
     default_value = int(default_value)
     if default_value not in options:
@@ -227,11 +110,16 @@ def _list_or_custom(label: str, options, default_value, minv, maxv, step=1, desc
         description=(label if label.endswith(":") else f"{label}:"),
         layout=common_layout, style=desc_style
     )
+
+    # Only one visible at a time
     container = W.VBox([dd])
     def _on_mode(change):
         container.children = [dd] if change["new"] == "list" else [txt]
     mode.observe(_on_mode, names="value")
-    def get_value(): return int(dd.value if mode.value == "list" else txt.value)
+
+    def get_value():
+        return int(dd.value if mode.value == "list" else txt.value)
+
     return mode, container, dd, txt, get_value
 
 def _logo_widget(branding: dict):
@@ -312,33 +200,36 @@ def launch(
         minv=1, maxv=10_000_000, step=1000, desc_style=DESC
     )
 
-    # ---------- Mode 2 ----------
+    # ---------- Mode 2: initial residue + short path length + number of paths ----------
     init_idx   = W.BoundedIntText(value=1, min=1, max=1_000_000, step=1,
                                   description="Index of initial residue:",
                                   layout=wide, style=DESC)
     init_chain = W.Text(value="", description="Chain of initial residue:",
                         placeholder="A", layout=wide, style=DESC)
+
     short_len_opts = [5, 8, 10, 13, 15, 20, 25, 30]
     (pl_mode_short, pl_container_short, pl_dd_short, pl_txt_short, get_short_len) = _list_or_custom(
         label="Length of Paths", options=short_len_opts, default_value=5,
         minv=1, maxv=10_000, step=1, desc_style=DESC
     )
+
     num_paths_opts_mode2 = [1000, 2000, 3000, 5000, 10000, 20000, 30000, 40000, 50000]
     (np_mode_2, np_container_2, np_dd_2, np_txt_2, get_num_paths_2) = _list_or_custom(
         label="Number of Paths", options=num_paths_opts_mode2, default_value=1000,
-        minv=1, maxv=10_000_000, step=100, desc_style=DESC   # <-- maxv (not max)
+        minv=1, maxv=10_000_000, step=100, desc_style=DESC
     )
 
-    # ---------- Mode 3 ----------
+    # ---------- Mode 3: initial & final residues + number of paths ----------
     final_idx   = W.BoundedIntText(value=1, min=1, max=1_000_000, step=1,
                                    description="Index of final residue:",
                                    layout=wide, style=DESC)
     final_chain = W.Text(value="", description="Chain of final residue:",
                          placeholder="B", layout=wide, style=DESC)
+
     num_paths_opts_mode3 = [1000, 2000, 3000, 5000, 10000, 30000, 50000]
     (np_mode_3, np_container_3, np_dd_3, np_txt_3, get_num_paths_3) = _list_or_custom(
         label="Number of Paths", options=num_paths_opts_mode3, default_value=1000,
-        minv=1, maxv=10_000_000, step=100, desc_style=DESC   # <-- maxv (not max)
+        minv=1, maxv=10_000_000, step=100, desc_style=DESC
     )
 
     # ---------- Actions & output ----------
@@ -352,8 +243,16 @@ def launch(
                                      flex_flow="row wrap", gap="10px"))
 
     functional_box = W.VBox([pl_mode_big, pl_container_big])
-    mode2_box = W.VBox([init_idx, init_chain, pl_mode_short, pl_container_short, np_mode_2, np_container_2])
-    mode3_box = W.VBox([init_idx, init_chain, final_idx, final_chain, np_mode_3, np_container_3])
+    mode2_box = W.VBox([
+        init_idx, init_chain,
+        pl_mode_short, pl_container_short,
+        np_mode_2,   np_container_2
+    ])
+    mode3_box = W.VBox([
+        init_idx, init_chain,
+        final_idx, final_chain,
+        np_mode_3,  np_container_3
+    ])
 
     def _sync_mode(*_):
         functional_box.layout.display = "none"
@@ -441,21 +340,41 @@ def launch(
                 mode = pred_type.value
 
                 if mode == "functional":
-                    rows = ["1", pdb_name, chain_global, str(get_big_len()), email.value.strip() or "-"]
+                    rows = [
+                        "1",              # mode
+                        pdb_name,         # pdb file name
+                        chain_global,     # global chain
+                        str(get_big_len()),
+                        email.value.strip() or "-"
+                    ]
                 elif mode == "paths_init_len":
                     if not _is_valid_chain(init_chain.value or ""):
                         raise ValueError("Chain of initial residue must be a single character.")
-                    rows = ["2", pdb_name, chain_global, str(get_short_len()),
-                            str(get_num_paths_2()), str(int(init_idx.value)),
-                            (init_chain.value or "").strip(), email.value.strip() or "-"]
-                else:
+                    rows = [
+                        "2",
+                        pdb_name,
+                        chain_global,
+                        str(get_short_len()),
+                        str(get_num_paths_2()),
+                        str(int(init_idx.value)),
+                        (init_chain.value or "").strip(),
+                        email.value.strip() or "-"
+                    ]
+                else:  # paths_init_final
                     if not _is_valid_chain(init_chain.value or ""):
                         raise ValueError("Chain of initial residue must be a single character.")
                     if not _is_valid_chain(final_chain.value or ""):
                         raise ValueError("Chain of final residue must be a single character.")
-                    rows = ["3", pdb_name, chain_global, str(int(init_idx.value)),
-                            (init_chain.value or "").strip(), str(int(final_idx.value)),
-                            (final_chain.value or "").strip(), email.value.strip() or "-"]
+                    rows = [
+                        "3",
+                        pdb_name,
+                        chain_global,
+                        str(int(init_idx.value)),
+                        (init_chain.value or "").strip(),
+                        str(int(final_idx.value)),
+                        (final_chain.value or "").strip(),
+                        email.value.strip() or "-"
+                    ]
 
                 with open(input_path, "w") as f:
                     for r in rows:
@@ -463,9 +382,14 @@ def launch(
                 print(f"Input file saved: {input_path}")
 
                 # Optional POST
-                data = {"prediction_mode": mode, FN["chain_id"]: chain_global}
-                if pdb_code.value.strip(): data[FN["pdb_code"]] = pdb_code.value.strip().upper()
-                if email.value.strip():    data[FN["email"]]    = email.value.strip()
+                data = {
+                    "prediction_mode": mode,
+                    FN["chain_id"]: chain_global,
+                }
+                if pdb_code.value.strip():
+                    data[FN["pdb_code"]] = pdb_code.value.strip().upper()
+                if email.value.strip():
+                    data[FN["email"]] = email.value.strip()
 
                 if mode == "functional":
                     data[FN["path_length"]] = str(get_big_len())
@@ -486,6 +410,7 @@ def launch(
                     })
 
                 files = {"pdb_file": (pdb_name, pdb_bytes, "chemical/x-pdb")}
+
                 if not target_url:
                     print("\n(No target_url set) — preview only payload below:\n")
                     preview = dict(data); preview["attached_file"] = pdb_name
@@ -574,18 +499,13 @@ end
                     with open(runner_path, "w") as f:
                         f.write(runner)
 
-                    # --- Ensure Octave (Drive cache → apt → micromamba) ---
+                    # --- Ensure Octave is present and pick command ---
                     print("▶ Launching Octave… (timeout=180s)")
                     try:
-                        octave_cmd = ensure_octave_smart(
-                            drive_cache_dir="/content/drive/MyDrive/octave_debs",
-                            install_timeout=300,
-                            allow_micromamba=True
-                        )
+                        octave_cmd = _ensure_octave_and_pick_cmd()
                         cd_escaped = SAVE_DIR_REAL.replace("'", "''")
-                        base_cmd = shlex.split(octave_cmd)  # supports micromamba shim
                         proc = subprocess.run(
-                            base_cmd + ["-qf", "--eval", f"cd('{cd_escaped}'); run('run_mcpath.m');"],
+                            [octave_cmd, "-qf", "--eval", f"cd('{cd_escaped}'); run('run_mcpath.m');"],
                             text=True, timeout=180
                         )
                         rc = proc.returncode
