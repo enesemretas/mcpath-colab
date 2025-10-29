@@ -3,13 +3,6 @@ import os, re, requests, yaml, importlib
 from IPython.display import display, clear_output
 import ipywidgets as W
 
-# Prefer Colab's picker; fall back gracefully
-try:
-    from google.colab import files as colab_files
-    _HAS_COLAB = True
-except Exception:
-    _HAS_COLAB = False
-
 # -------------------- validators & helpers --------------------
 def _is_valid_pdb_code(c): return bool(re.fullmatch(r"[0-9A-Za-z]{4}", c.strip()))
 def _is_valid_chain(ch):   return bool(re.fullmatch(r"[A-Za-z0-9]", ch.strip()))
@@ -31,12 +24,8 @@ def _list_or_custom(label: str, options, default_value, minv, maxv, step=1):
     txt  = W.BoundedIntText(value=default_value, min=minv, max=maxv, step=step, description=label)
 
     def _sync(*_):
-        if mode.value == "list":
-            dd.layout.display = ""
-            txt.layout.display = "none"
-        else:
-            dd.layout.display = "none"
-            txt.layout.display = ""
+        dd.layout.display  = "" if mode.value == "list" else "none"
+        txt.layout.display = "none" if mode.value == "list" else ""
     _sync()
     mode.observe(_sync, names="value")
 
@@ -47,8 +36,7 @@ def _list_or_custom(label: str, options, default_value, minv, maxv, step=1):
 
 def _logo_widget(branding: dict):
     url = (branding.get("logo_url") or "").strip()
-    if not url:
-        return None
+    if not url: return None
     height = int(branding.get("logo_height", 96))
     align  = (branding.get("logo_align") or "center").lower()
     try:
@@ -72,35 +60,45 @@ def launch(
     # ---------- Branding ----------
     logo = _logo_widget(cfg.get("branding", {}))
 
-    # ---------- PDB: code OR single-button upload ----------
-    pdb_code   = W.Text(value=str(cfg.get("pdb_code", "")), description="PDB code:")
-    or_lbl     = W.HTML("<b>&nbsp;&nbsp;or&nbsp;&nbsp;</b>")
-    btn_pick   = W.Button(description="Choose file", icon="upload")
-    file_lbl   = W.Label("No file chosen")
+    # ---------- PDB: code OR single FileUpload button ----------
+    pdb_code = W.Text(value=str(cfg.get("pdb_code", "")), description="PDB code:")
+    or_lbl   = W.HTML("<b>&nbsp;&nbsp;or&nbsp;&nbsp;</b>")
+    file_lbl = W.Label("No file chosen")
 
-    # Store chosen file (name, bytes)
+    # state for selected upload
     picked = {"name": None, "bytes": None}
 
-    def _on_pick(_):
-        if not _HAS_COLAB:
-            file_lbl.value = "Colab picker not available in this environment."
-            return
-        try:
-            result = colab_files.upload()
-            if not result:
-                return
-            name, data = next(iter(result.items()))
-            picked["name"]  = name
-            picked["bytes"] = data
-            file_lbl.value  = f"{name}"
-        except Exception as e:
-            file_lbl.value = f"Upload failed: {e}"
+    def make_uploader():
+        up = W.FileUpload(
+            accept=".pdb",
+            multiple=False,
+            description="Choose file",
+            layout=W.Layout(width="200px")
+        )
+        def on_change(change):
+            # ipywidgets v8 returns dict-like {filename: {content: b'...', ...}}
+            # older might return a tuple of dicts; handle both robustly.
+            name = None; content = None
+            v = up.value
+            if isinstance(v, dict) and v:
+                name, meta = next(iter(v.items()))
+                content = meta.get("content", None)
+            elif isinstance(v, tuple) and v:
+                meta = v[0]
+                name = meta.get("name") or next(iter(meta.keys()), None)
+                content = meta.get("content")
+            if name and content is not None:
+                picked["name"]  = name
+                picked["bytes"] = content
+                file_lbl.value  = name
+        up.observe(on_change, names="value")
+        return up
 
-    btn_pick.on_click(_on_pick)
+    pdb_upload = make_uploader()
 
     # ---------- Always fields ----------
-    chain_id   = W.Text(value=str(cfg.get("chain_id", "A")), description="Chain ID:")
-    email      = W.Text(value=str(cfg.get("email", "")), description="Email (opt):")
+    chain_id = W.Text(value=str(cfg.get("chain_id", "A")), description="Chain ID:")
+    email    = W.Text(value=str(cfg.get("email", "")), description="Email (opt):")
 
     # ---------- Prediction type ----------
     pred_type = W.RadioButtons(
@@ -115,10 +113,7 @@ def launch(
     )
 
     # ---------- Functional mode ----------
-    big_opts = cfg.get("path_length_options", [
-        100000, 200000, 300000, 400000, 500000, 750000,
-        1000000, 2000000, 3000000, 4000000
-    ])
+    big_opts = cfg.get("path_length_options", [100000,200000,300000,400000,500000,750000,1000000,2000000,3000000,4000000])
     big_default = int(cfg.get("path_length", big_opts[0] if big_opts else 100000))
     (pl_mode_big, pl_dd_big, pl_txt_big, get_big_len) = _list_or_custom(
         label="Path length:", options=big_opts, default_value=big_default,
@@ -133,7 +128,7 @@ def launch(
         label="Length of Paths:", options=short_len_opts, default_value=5,
         minv=1, maxv=10_000, step=1
     )
-    num_paths_opts_mode2 = [1000, 2000, 3000, 5000, 10000, 20000, 30000, 40000, 50000]
+    num_paths_opts_mode2 = [1000,2000,3000,5000,10000,20000,30000,40000,50000]
     (np_mode_2, np_dd_2, np_txt_2, get_num_paths_2) = _list_or_custom(
         label="Number of Paths:", options=num_paths_opts_mode2, default_value=1000,
         minv=1, maxv=10_000_000, step=100
@@ -142,7 +137,7 @@ def launch(
     # ---------- Mode 3 ----------
     final_idx   = W.BoundedIntText(value=1, min=1, max=1_000_000, step=1, description="Index of final residue")
     final_chain = W.Text(value="", description="Chain of final residue", placeholder="B", layout=W.Layout(width="260px"))
-    num_paths_opts_mode3 = [1000, 2000, 3000, 5000, 10000, 30000, 50000]
+    num_paths_opts_mode3 = [1000,2000,3000,5000,10000,30000,50000]
     (np_mode_3, np_dd_3, np_txt_3, get_num_paths_3) = _list_or_custom(
         label="Number of Paths:", options=num_paths_opts_mode3, default_value=1000,
         minv=1, maxv=10_000_000, step=100
@@ -154,7 +149,7 @@ def launch(
     out        = W.Output()
 
     # ---------- Layout ----------
-    pdb_row = W.HBox([pdb_code, W.HTML("&nbsp;"), or_lbl, btn_pick, file_lbl])
+    pdb_row = W.HBox([pdb_code, W.HTML("&nbsp;"), W.HTML("<b>or</b>"), pdb_upload, file_lbl])
     functional_box = W.VBox([pl_mode_big, pl_dd_big, pl_txt_big])
     mode2_box = W.VBox([init_idx, init_chain, pl_mode_short, pl_dd_short, pl_txt_short, np_mode_2, np_dd_2, np_txt_2])
     mode3_box = W.VBox([init_idx, init_chain, final_idx, final_chain, np_mode_3, np_dd_3, np_txt_3])
@@ -186,6 +181,7 @@ def launch(
 
     # -------------------- handlers --------------------
     def on_clear(_):
+        nonlocal pdb_upload
         pdb_code.value = ""
         picked["name"] = None; picked["bytes"] = None
         file_lbl.value = "No file chosen"
@@ -198,6 +194,10 @@ def launch(
         np_mode_2.value = "list"; np_dd_2.value = np_dd_2.options[0]; np_txt_2.value = int(np_dd_2.options[0])
         final_idx.value = 1; final_chain.value = ""
         np_mode_3.value = "list"; np_dd_3.value = np_dd_3.options[0]; np_txt_3.value = int(np_dd_3.options[0])
+        # recreate the uploader (FileUpload.value is read-only)
+        new_up = make_uploader()
+        pdb_row.children = [pdb_code, W.HTML("&nbsp;"), W.HTML("<b>or</b>"), new_up, file_lbl]
+        pdb_upload = new_up
         with out: clear_output()
 
     def _collect_pdb_bytes():
@@ -287,8 +287,7 @@ def launch(
                 if not target_url:
                     print("\n(No target_url set) — preview only payload below:\n")
                     preview = dict(data); preview["attached_file"] = pdb_name
-                    print(preview)
-                    return
+                    print(preview); return
 
                 print(f"Submitting to {target_url} …")
                 r = requests.post(target_url, data=data, files=files, timeout=180)
