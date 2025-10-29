@@ -2,6 +2,13 @@ import os, re, requests, yaml, io, importlib
 from IPython.display import display, clear_output
 import ipywidgets as W
 
+# Try Colab uploader (used as a fallback when FileUpload misbehaves)
+try:
+    from google.colab import files as colab_files
+    _HAS_COLAB = True
+except Exception:
+    _HAS_COLAB = False
+
 # -------------------- validators & helpers --------------------
 def _is_valid_pdb_code(c): return bool(re.fullmatch(r"[0-9A-Za-z]{4}", c.strip()))
 def _is_valid_chain(ch):   return bool(re.fullmatch(r"[A-Za-z0-9]", ch.strip()))
@@ -74,13 +81,41 @@ def launch(
     pdb_upload = W.FileUpload(accept=".pdb", multiple=False, description="Choose file (1)")
     file_lbl   = W.Label("No file chosen")
 
+    # Fallback uploader (Colab’s native dialog)
+    btn_colab  = W.Button(description="Upload (Colab)", tooltip="Use Colab’s native file picker if the widget fails")
+    manual_upload_store = {"name": None, "bytes": None}  # filled by Colab upload
+
     def _on_upload_change(change):
         if pdb_upload.value:
             fname = next(iter(pdb_upload.value.keys()))
-            file_lbl.value = fname
+            file_lbl.value = fname + " (widget)"
+            # If we already had a manual file, clear it to avoid ambiguity
+            manual_upload_store["name"] = None
+            manual_upload_store["bytes"] = None
         else:
-            file_lbl.value = "No file chosen"
+            if manual_upload_store["name"]:
+                file_lbl.value = manual_upload_store["name"] + " (colab)"
+            else:
+                file_lbl.value = "No file chosen"
+
+    def _on_colab_upload(_):
+        if not _HAS_COLAB:
+            file_lbl.value = "Colab uploader not available in this environment."
+            return
+        try:
+            picked = colab_files.upload()  # opens the browser dialog
+            if not picked:
+                return
+            # pick the first file
+            fname, data = next(iter(picked.items()))
+            manual_upload_store["name"]  = fname
+            manual_upload_store["bytes"] = data
+            file_lbl.value = f"{fname} (colab)"
+        except Exception as e:
+            file_lbl.value = f"Colab upload failed: {e}"
+
     pdb_upload.observe(_on_upload_change, names="value")
+    btn_colab.on_click(_on_colab_upload)
 
     # ---------- Always-present fields ----------
     chain_id   = W.Text(value=str(cfg.get("chain_id", "A")), description="Chain ID:")
@@ -139,8 +174,8 @@ def launch(
     out        = W.Output()
 
     # ---------- Grouped layouts ----------
-    # (upload row in a single line with filename label)
-    pdb_row = W.HBox([pdb_code, W.HTML("&nbsp;"), or_lbl, pdb_upload, file_lbl])
+    # Upload row: widget + Colab fallback + filename label
+    pdb_row = W.HBox([pdb_code, W.HTML("&nbsp;"), or_lbl, pdb_upload, btn_colab, file_lbl])
 
     functional_box = W.VBox([pl_mode_big, pl_dd_big, pl_txt_big])
     mode2_box = W.VBox([
@@ -193,6 +228,8 @@ def launch(
         pdb_code.value = ""
         _new_uploader()
         file_lbl.value = "No file chosen"
+        manual_upload_store["name"] = None
+        manual_upload_store["bytes"] = None
         chain_id.value = str(cfg.get("chain_id","A"))
         email.value = ""
         pred_type.value = "functional"
@@ -205,9 +242,16 @@ def launch(
         with out: clear_output()
 
     def _collect_pdb_bytes():
+        # 1) Prefer the widget if it actually has bytes
         if pdb_upload.value:
             (fname, meta) = next(iter(pdb_upload.value.items()))
-            return meta["content"], fname
+            content = meta.get("content", None)
+            if content:
+                return content, fname
+        # 2) Fallback to the Colab uploader result
+        if manual_upload_store["bytes"] is not None:
+            return manual_upload_store["bytes"], manual_upload_store["name"]
+        # 3) Otherwise expect a PDB code for RCSB
         code = pdb_code.value.strip()
         if not _is_valid_pdb_code(code):
             raise ValueError("PDB code must be exactly 4 alphanumeric characters (or upload a file).")
