@@ -1,7 +1,38 @@
 # mcpath/ui.py
-import os, re, requests, yaml, subprocess
+import os, re, requests, yaml, subprocess, shutil, sys
 from IPython.display import display, clear_output
 import ipywidgets as W
+
+# -------------------- Octave availability helper --------------------
+def _ensure_octave_and_pick_cmd(install_timeout=300):
+    """
+    Return the octave executable to use ('octave' or 'octave-cli').
+    If neither exists and we're in Colab (/content), attempt apt-get install.
+    """
+    cand = shutil.which("octave") or shutil.which("octave-cli")
+    if cand:
+        return cand
+
+    # Attempt best-effort install on Colab
+    in_colab = os.path.isdir("/content")
+    if in_colab:
+        try:
+            print("⚙️ Octave not found — installing via apt-get (this may take a minute)…")
+            subprocess.run(["apt-get", "update", "-qq"], check=True, text=True)
+            subprocess.run(
+                ["apt-get", "install", "-y", "-qq", "octave", "gnuplot"],
+                check=True, text=True, timeout=install_timeout
+            )
+            cand = shutil.which("octave") or shutil.which("octave-cli")
+            if cand:
+                print("✅ Octave installed:", cand)
+                return cand
+        except Exception as e:
+            print("❌ Failed to auto-install Octave:", e)
+
+    raise FileNotFoundError(
+        "Octave executable not found. Please install GNU Octave (e.g., `apt-get install octave`)."
+    )
 
 # -------------------- Octave pdbreader shim (fallback) --------------------
 # Only used if you don't supply a real pdbreader.m via cfg['pdbreader_url'].
@@ -468,18 +499,22 @@ end
                     with open(runner_path, "w") as f:
                         f.write(runner)
 
-                    # Run Octave with a hard timeout
-                    cd_escaped = SAVE_DIR_REAL.replace("'", "''")
+                    # --- Ensure Octave is present and pick command ---
                     print("▶ Launching Octave… (timeout=180s)")
                     try:
+                        octave_cmd = _ensure_octave_and_pick_cmd()
+                        cd_escaped = SAVE_DIR_REAL.replace("'", "''")
                         proc = subprocess.run(
-                            ["octave", "-qf", "--eval", f"cd('{cd_escaped}'); run('run_mcpath.m');"],
+                            [octave_cmd, "-qf", "--eval", f"cd('{cd_escaped}'); run('run_mcpath.m');"],
                             text=True, timeout=180
                         )
                         rc = proc.returncode
                     except subprocess.TimeoutExpired:
                         print("❌ Octave timed out after 180s. Check /content/octave.log")
                         rc = -1
+                    except FileNotFoundError as e:
+                        print("❌", e)
+                        rc = -2
 
                     # Show diary tail
                     log_path = os.path.join(SAVE_DIR_REAL, "octave.log")
