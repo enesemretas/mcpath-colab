@@ -33,7 +33,6 @@ def _ensure_octave_and_pick_cmd(install_timeout=300):
     # 3) Common install locations by OS
     sysname = platform.system().lower()
     candidates = []
-
     if sysname == "windows":
         candidates += [
             r"C:\Octave\Octave-9.1.0\mingw64\bin\octave-cli.exe",
@@ -190,10 +189,13 @@ def _logo_widget(branding: dict):
 # -------------------- main UI --------------------
 def launch(
     defaults_url="https://raw.githubusercontent.com/enesemretas/mcpath-colab/main/config/defaults.yaml",
-    show_title="MCPath-style Parameters",
+    show_title="MCPath Parameters",
     allow_multiple=False
 ):
-    """Launch the MCPath parameter form."""
+    """
+    Launch the MCPath parameter form (single instance by default).
+    This version removes autolaunch and groups fields like the uploaded ANM-LD panel.
+    """
     global _FORM_SHOWN, _FORM_HANDLE
 
     # Singleton guard
@@ -215,31 +217,76 @@ def launch(
     logo = _logo_widget(cfg.get("branding", {}))
     DESC = {'description_width': '260px'}
     wide = W.Layout(width="460px", min_width="420px")
+    full = W.Layout(width="100%")
 
-    # ---------- PDB: code OR upload ----------
-    pdb_code   = W.Text(value=str(cfg.get("pdb_code", "")),
-                        description="PDB code:",
-                        layout=wide, style=DESC)
-    or_lbl     = W.HTML("<b>&nbsp;&nbsp;or&nbsp;&nbsp;</b>")
-    pdb_upload = W.FileUpload(accept=".pdb", multiple=False, description="Choose File")
-    file_lbl   = W.Label("No file chosen")
+    # ====== Header ======
+    header = W.HTML("<h3 style='margin:0 0 6px 0;'>Install MCPath & Initialize run</h3>")
+
+    # ====== Job section (like 'jobname' in the screenshot) ======
+    jobname = W.Text(value="mcpath_run",
+                     description="jobname:",
+                     placeholder="e.g., mcpath_run",
+                     layout=wide, style=DESC)
+
+    job_box = W.VBox([
+        W.HTML("<b>Job</b>"),
+        jobname
+    ])
+
+    # ====== Structure Source section (Download from PDB vs Upload) ======
+    download_from_pdb = W.Checkbox(value=True, description="download_structure_from_PDB:")
+    pdb_code = W.Text(value=str(cfg.get("pdb_code", "")),
+                      description="pdb_code:",
+                      placeholder="e.g., 1ake",
+                      layout=wide, style=DESC)
+
+    upload_toggle = W.Checkbox(value=False, description="upload_structure:")
+    upload_filename_lbl = W.Label("No file chosen")
+    pdb_upload = W.FileUpload(accept=".pdb", multiple=False, description="Pick .pdb")
     def _on_upload_change(change):
         if pdb_upload.value:
             fname = next(iter(pdb_upload.value.keys()))
-            file_lbl.value = fname
+            upload_filename_lbl.value = fname
         else:
-            file_lbl.value = "No file chosen"
+            upload_filename_lbl.value = "No file chosen"
     pdb_upload.observe(_on_upload_change, names="value")
 
-    # ---------- Always-present fields ----------
+    # Mutually-exclusive behavior like the uploaded UI
+    def _sync_source(_=None):
+        if download_from_pdb.value:
+            upload_toggle.value = False
+        if upload_toggle.value:
+            download_from_pdb.value = False
+        pdb_code.layout.display = "" if download_from_pdb.value else "none"
+        pdb_upload.layout.display = "" if upload_toggle.value else "none"
+        upload_filename_lbl.layout.display = "" if upload_toggle.value else "none"
+    download_from_pdb.observe(_sync_source, names="value")
+    upload_toggle.observe(_sync_source, names="value")
+    _sync_source()
+
+    struct_help = W.HTML(
+        "<ul style='margin:4px 0 0 18px'>"
+        "<li>Download the asymmetric unit from RCSB and save to <code>{jobname}/in/{pdb_code}.pdb</code></li>"
+        "<li>Or upload a local <code>.pdb</code> file</li>"
+        "</ul>"
+    )
+
+    structure_box = W.VBox([
+        W.HTML("<b>Structure source</b>"),
+        download_from_pdb, pdb_code,
+        upload_toggle, W.HBox([pdb_upload, upload_filename_lbl]),
+        struct_help
+    ])
+
+    # ====== Prediction Settings (your original three modes) ======
     chain_id   = W.Text(value=str(cfg.get("chain_id", "")),
-                        description="Chain ID:",
+                        description="chain_id:",
+                        placeholder="A",
                         layout=wide, style=DESC)
     email      = W.Text(value=str(cfg.get("email", "")),
-                        description="Email (opt):",
+                        description="email (opt):",
                         layout=wide, style=DESC)
 
-    # ---------- Prediction type ----------
     pred_type = W.RadioButtons(
         options=[
             ("Functional Residues", "functional"),
@@ -247,75 +294,54 @@ def launch(
             ("Allosteric Paths (initial & final residues)", "paths_init_final"),
         ],
         value="functional",
-        description="Prediction:",
+        description="prediction:",
         layout=W.Layout(width="auto"),
         style=DESC
     )
 
-    # ---------- Functional mode: large path length ----------
+    # Functional mode
     big_opts = cfg.get("path_length_options", [
         100000, 200000, 300000, 400000, 500000, 750000,
         1000000, 2000000, 3000000, 4000000
     ])
     big_default = int(cfg.get("path_length", big_opts[0] if big_opts else 100000))
     (pl_mode_big, pl_container_big, pl_dd_big, pl_txt_big, get_big_len) = _list_or_custom(
-        label="Path length", options=big_opts, default_value=big_default,
+        label="path_length", options=big_opts, default_value=big_default,
         minv=1, maxv=10_000_000, step=1000, desc_style=DESC
     )
 
-    # ---------- Mode 2: initial residue + short path length + number of paths ----------
+    # Mode 2: init + short len + n paths
     init_idx   = W.BoundedIntText(value=1, min=1, max=1_000_000, step=1,
-                                  description="Index of initial residue:",
+                                  description="index_initial:",
                                   layout=wide, style=DESC)
-    init_chain = W.Text(value="", description="Chain of initial residue:",
+    init_chain = W.Text(value="", description="chain_initial:",
                         placeholder="A", layout=wide, style=DESC)
 
     short_len_opts = [5, 8, 10, 13, 15, 20, 25, 30]
     (pl_mode_short, pl_container_short, pl_dd_short, pl_txt_short, get_short_len) = _list_or_custom(
-        label="Length of Paths", options=short_len_opts, default_value=5,
+        label="length_paths", options=short_len_opts, default_value=5,
         minv=1, maxv=10_000, step=1, desc_style=DESC
     )
-
     num_paths_opts_mode2 = [1000, 2000, 3000, 5000, 10000, 20000, 30000, 40000, 50000]
     (np_mode_2, np_container_2, np_dd_2, np_txt_2, get_num_paths_2) = _list_or_custom(
-        label="Number of Paths", options=num_paths_opts_mode2, default_value=1000,
+        label="number_paths", options=num_paths_opts_mode2, default_value=1000,
         minv=1, maxv=10_000_000, step=100, desc_style=DESC
     )
 
-    # ---------- Mode 3: initial & final residues + number of paths ----------
+    # Mode 3: init + final + n paths
     final_idx   = W.BoundedIntText(value=1, min=1, max=1_000_000, step=1,
-                                   description="Index of final residue:",
-                                   layout=wide, style=DESC)
-    final_chain = W.Text(value="", description="Chain of final residue:",
+                                   description="index_final:", layout=wide, style=DESC)
+    final_chain = W.Text(value="", description="chain_final:",
                          placeholder="B", layout=wide, style=DESC)
-
     num_paths_opts_mode3 = [1000, 2000, 3000, 5000, 10000, 30000, 50000]
     (np_mode_3, np_container_3, np_dd_3, np_txt_3, get_num_paths_3) = _list_or_custom(
-        label="Number of Paths", options=num_paths_opts_mode3, default_value=1000,
+        label="number_paths", options=num_paths_opts_mode3, default_value=1000,
         minv=1, maxv=10_000_000, step=100, desc_style=DESC
     )
 
-    # ---------- Actions & output ----------
-    btn_submit = W.Button(description="Submit", button_style="success", icon="paper-plane")
-    btn_clear  = W.Button(description="Clear",  button_style="warning", icon="trash")
-    out        = W.Output()
-
-    # ---------- Grouped layouts ----------
-    pdb_row = W.HBox([pdb_code, W.HTML("&nbsp;"), or_lbl, pdb_upload, file_lbl],
-                     layout=W.Layout(align_items="center", justify_content="flex-start",
-                                     flex_flow="row wrap", gap="10px"))
-
     functional_box = W.VBox([pl_mode_big, pl_container_big])
-    mode2_box = W.VBox([
-        init_idx, init_chain,
-        pl_mode_short, pl_container_short,
-        np_mode_2,   np_container_2
-    ])
-    mode3_box = W.VBox([
-        init_idx, init_chain,
-        final_idx, final_chain,
-        np_mode_3,  np_container_3
-    ])
+    mode2_box = W.VBox([init_idx, init_chain, pl_mode_short, pl_container_short, np_mode_2, np_container_2])
+    mode3_box = W.VBox([init_idx, init_chain, final_idx, final_chain, np_mode_3, np_container_3])
 
     def _sync_mode(*_):
         functional_box.layout.display = "none"
@@ -330,25 +356,55 @@ def launch(
     _sync_mode()
     pred_type.observe(_sync_mode, names="value")
 
-    # ---------- Render UI ----------
-    children = []
-    if logo: children.append(logo)
-    children += [
-        W.HTML(f"<h3>{show_title}</h3>"),
-        pdb_row,
-        W.HTML("<b>Prediction of:</b>"),
+    pred_box = W.VBox([
+        W.HTML("<b>Prediction settings</b>"),
         pred_type,
         functional_box,
         mode2_box,
         mode3_box,
-        chain_id, email,
-        W.HBox([btn_submit, btn_clear]),
-        W.HTML("<hr>"), out
-    ]
-    root = W.VBox(children, layout=W.Layout(width="auto"))
-    display(root)
+        chain_id, email
+    ])
+
+    # ====== Buttons & Output ======
+    btn_submit = W.Button(description="Submit & Run", button_style="success", icon="play")
+    btn_clear  = W.Button(description="Clear",        button_style="warning", icon="trash")
+    out        = W.Output()
+
+    # ====== Compose page like the uploaded design ======
+    # Left column: title + small hint; Right column: stacked parameter cards
+    top_hint = W.HTML(
+        "<div style='color:#555;margin:4px 0 10px 0'>"
+        "OpenMM/CUDA is not required here; the pipeline uses Octave. "
+        "If Octave is missing on Colab, the form will offer to install it automatically."
+        "</div>"
+    )
+
+    # Cards (simple bordered boxes to mimic form panels)
+    def card(widget_vbox):
+        return W.VBox(
+            [widget_vbox],
+            layout=W.Layout(border="1px solid #ddd", padding="8px 12px", margin="6px 0 6px 0", border_radius="8px")
+        )
+
+    right_stack = W.VBox([
+        card(job_box),
+        card(structure_box),
+        card(pred_box),
+        W.HBox([btn_submit, btn_clear], layout=W.Layout(justify_content="flex-start", gap="10px")),
+    ], layout=W.Layout(width="640px"))
+
+    page = W.VBox([
+        (logo if logo else W.HBox([])),
+        header,
+        top_hint,
+        right_stack,
+        W.HTML("<hr style='margin:12px 0'>"),
+        out
+    ], layout=full)
+
+    display(page)
     _FORM_SHOWN = True
-    _FORM_HANDLE = root
+    _FORM_HANDLE = page
 
     # -------------------- handlers --------------------
     def on_clear(_):
@@ -357,7 +413,7 @@ def launch(
             pdb_upload.value.clear()
         except Exception:
             pdb_upload.value = {}
-        file_lbl.value = "No file chosen"
+        upload_filename_lbl.value = "No file chosen"
         chain_id.value = ""
         email.value = ""
         pred_type.value = "functional"
@@ -372,15 +428,22 @@ def launch(
         np_dd_2.value = np_dd_2.options[0];       np_txt_2.value = int(np_dd_2.options[0])
         final_idx.value = 1; final_chain.value = ""
         np_dd_3.value = np_dd_3.options[0];       np_txt_3.value = int(np_dd_3.options[0])
+        download_from_pdb.value = True
+        upload_toggle.value = False
+        _sync_source()
         with out: clear_output()
 
     def _collect_pdb_bytes():
-        if pdb_upload.value:
+        # Respect source toggle like the uploaded UI
+        if upload_toggle.value:
+            if not pdb_upload.value:
+                raise ValueError("Please upload a .pdb file (upload_structure is enabled).")
             (fname, meta) = next(iter(pdb_upload.value.items()))
             return meta["content"], fname
+        # Else download from PDB
         code = pdb_code.value.strip()
         if not _is_valid_pdb_code(code):
-            raise ValueError("PDB code must be exactly 4 alphanumeric characters (or upload a file).")
+            raise ValueError("PDB code must be exactly 4 alphanumeric characters (e.g., 1AKE).")
         return _fetch_rcsb(code), f"{code.upper()}.pdb"
 
     def on_submit(_):
@@ -397,23 +460,26 @@ def launch(
                 print("▶ Getting PDB (upload or RCSB)…")
                 pdb_bytes, pdb_name = _collect_pdb_bytes()
 
-                # Save PDB
-                save_path = os.path.join(SAVE_DIR, pdb_name)
+                # Save PDB to {jobname}/in/ to emulate the uploaded workflow text
+                job = jobname.value.strip() or "mcpath_run"
+                in_dir = os.path.join(SAVE_DIR, job, "in")
+                os.makedirs(in_dir, exist_ok=True)
+                save_path = os.path.join(in_dir, pdb_name)
                 with open(save_path, "wb") as f:
                     f.write(pdb_bytes)
                 print(f"Saved local copy: {save_path}")
 
-                # Build mcpath_input.txt
-                input_path = os.path.join(os.path.dirname(save_path), "mcpath_input.txt")
+                # Build mcpath_input.txt in the same job folder
+                input_path = os.path.join(SAVE_DIR, "mcpath_input.txt")  # kept for backwards-compat
                 rows = []
                 mode = pred_type.value
 
                 if mode == "functional":
                     rows = [
                         "1",              # mode
-                        pdb_name,         # pdb file name
+                        pdb_name,         # pdb file name (we run from job/in but readpdb takes filename only)
                         chain_global,     # global chain
-                        str(get_big_len()),
+                        str(int(pl_dd_big.value if pl_mode_big.value == "list" else pl_txt_big.value)),
                         email.value.strip() or "-"
                     ]
                 elif mode == "paths_init_len":
@@ -423,8 +489,8 @@ def launch(
                         "2",
                         pdb_name,
                         chain_global,
-                        str(get_short_len()),
-                        str(get_num_paths_2()),
+                        str(int(pl_dd_short.value if pl_mode_short.value == "list" else pl_txt_short.value)),
+                        str(int(np_dd_2.value if np_mode_2.value == "list" else np_txt_2.value)),
                         str(int(init_idx.value)),
                         (init_chain.value or "").strip(),
                         email.value.strip() or "-"
@@ -443,7 +509,7 @@ def launch(
                         str(int(final_idx.value)),
                         (final_chain.value or "").strip(),
                         email.value.strip() or "-",
-                        str(int(get_num_paths_3())),
+                        str(int(np_dd_3.value if np_mode_3.value == "list" else np_txt_3.value)),
                     ]
 
                 with open(input_path, "w") as f:
@@ -452,34 +518,29 @@ def launch(
                 print(f"Input file saved: {input_path}")
 
                 # Optional POST
-                data = {
-                    "prediction_mode": mode,
-                    FN["chain_id"]: chain_global,
-                }
-                if pdb_code.value.strip():
+                data = {"prediction_mode": mode, FN["chain_id"]: chain_global}
+                if not upload_toggle.value and pdb_code.value.strip():
                     data[FN["pdb_code"]] = pdb_code.value.strip().upper()
                 if email.value.strip():
                     data[FN["email"]] = email.value.strip()
 
                 if mode == "functional":
-                    data[FN["path_length"]] = str(get_big_len())
+                    data[FN["path_length"]] = rows[3]
                 elif mode == "paths_init_len":
                     data.update({
-                        "length_paths":  int(get_short_len()),
-                        "number_paths":  int(get_num_paths_2()),
-                        "index_initial": int(init_idx.value),
-                        "chain_initial": (init_chain.value or "").strip(),
+                        "length_paths":  rows[3],
+                        "number_paths":  rows[4],
+                        "index_initial": rows[5],
+                        "chain_initial": rows[6],
                     })
                 else:
                     data.update({
-                        "index_initial": int(init_idx.value),
-                        "chain_initial": (init_chain.value or "").strip(),
-                        "index_final":   int(final_idx.value),
-                        "chain_final":   (final_chain.value or "").strip(),
-                        "number_paths":  int(get_num_paths_3()),
+                        "index_initial": rows[3],
+                        "chain_initial": rows[4],
+                        "index_final":   rows[5],
+                        "chain_final":   rows[6],
+                        "number_paths":  rows[8],
                     })
-
-                files = {"pdb_file": (pdb_name, pdb_bytes, "chemical/x-pdb")}
 
                 if not target_url:
                     print("\n(No target_url set) — preview only payload below:\n")
@@ -487,6 +548,8 @@ def launch(
                     print(preview)
                 else:
                     print("▶ POSTing to server… (≤20s timeout)")
+                    with open(save_path, "rb") as fh:
+                        files = {"pdb_file": (pdb_name, fh.read(), "chemical/x-pdb")}
                     r = requests.post(target_url, data=data, files=files, timeout=20)
                     print("HTTP", r.status_code)
                     try: print("JSON:", r.json())
@@ -494,7 +557,16 @@ def launch(
 
                 # ---- Run Octave after submit? ----
                 if bool(cfg.get("run_octave_after_submit", False)):
-                    SAVE_DIR_REAL = os.path.dirname(save_path)
+                    # Put the working files into SAVE_DIR root (where the runner expects)
+                    # copy the PDB next to mcpath_input.txt as well
+                    save_path_root = os.path.join(SAVE_DIR, pdb_name)
+                    if save_path_root != save_path:
+                        try:
+                            shutil.copy2(save_path, save_path_root)
+                        except Exception:
+                            pass
+
+                    SAVE_DIR_REAL = SAVE_DIR  # runner works from /content
 
                     # Ensure pdbreader.m (shim or URL)
                     rp_parser = os.path.join(SAVE_DIR_REAL, "pdbreader.m")
@@ -541,7 +613,6 @@ def launch(
 
                     # === Ensure atomistic.m, infinite.m, and required data files ===
                     def _ensure_file(target_path, local_candidates=(), url_key=None, human_name=None):
-                        """Write file to target_path from first available source: local_candidates then cfg[url_key]."""
                         os.makedirs(os.path.dirname(target_path), exist_ok=True)
                         for lc in local_candidates:
                             try:
@@ -713,24 +784,9 @@ end
                             print("❌ Octave smoke test failed:", e_smoke)
                             raise
 
-                        # Run runner (avoid nested-escape bug)
-                        save_dir_escaped = SAVE_DIR_REAL.replace("'", "''")
-                        eval_code = (
-                            "try, "
-                            f"  cd('{save_dir_escaped}'); "
-                            "  disp('RUN_EVAL_CALLING_RUN_MCPATH'); fflush(stdout); "
-                            "  run('run_mcpath.m'); "
-                            "catch err, "
-                            "  disp('RUNNER_ERROR_BEGIN'); "
-                            "  disp(getReport(err, 'extended')); "
-                            "  disp('RUNNER_ERROR_END'); "
-                            "  exit(1); "
-                            "end; "
-                            "exit(0);"
-                        )
-
+                        # Run runner
                         proc = subprocess.run(
-                            [octave_cmd, "-qf", "--no-gui", "--no-window-system", "--eval", eval_code],
+                            [octave_cmd, "-qf", "--no-gui", "--no-window-system", "--eval", "run('run_mcpath.m'); exit(0);"],
                             text=True, capture_output=True, timeout=420,
                             cwd=SAVE_DIR_REAL
                         )
@@ -793,28 +849,3 @@ def close_form():
             pass
     _FORM_SHOWN = False
     _FORM_HANDLE = None
-
-# --- Auto-launch in Colab so the form is ready to fill immediately ---
-def _in_colab():
-    try:
-        import google.colab  # type: ignore
-        return True
-    except Exception:
-        return False
-
-def autolaunch(defaults_url: str = "https://raw.githubusercontent.com/enesemretas/mcpath-colab/main/config/defaults.yaml"):
-    """Manually trigger the UI (useful outside Colab or if autolaunch is disabled)."""
-    try:
-        launch(defaults_url=defaults_url, allow_multiple=False)
-    except Exception as e:
-        print("❌ autolaunch() failed:", e)
-
-# Auto-run when imported in Colab (can be disabled via MCPATH_AUTOLAUNCH=0)
-if os.environ.get("MCPATH_AUTOLAUNCH", "1") == "1" and _in_colab():
-    try:
-        from IPython import get_ipython
-        if get_ipython() is not None:
-            print("🔧 Auto-launching MCPath form…")
-            autolaunch()
-    except Exception as _e:
-        print("⚠️ Auto-launch skipped:", _e)
