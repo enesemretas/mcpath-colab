@@ -1,9 +1,9 @@
 # mcpath/ui.py
-import os, re, requests, yaml, importlib, threading, time
+import os, re, requests, yaml, importlib, time
 from IPython.display import display, clear_output
 import ipywidgets as W
 
-# --- ensure widgets work in Colab ---
+# --- make sure widgets are enabled in Colab (safe no-op elsewhere) ---
 try:
     from google.colab import output as _colab_output  # type: ignore
     _colab_output.enable_custom_widget_manager()
@@ -65,50 +65,77 @@ def launch(
 
     logo = _logo_widget(cfg.get("branding", {}))
 
-    # --- PDB code OR single FileUpload button ---
+    # --- PDB code OR upload with explicit Upload button ---
     pdb_code = W.Text(value=str(cfg.get("pdb_code", "")), description="PDB code:")
     or_lbl   = W.HTML("<b>&nbsp;&nbsp;or&nbsp;&nbsp;</b>")
     file_lbl = W.Label("No file chosen")
 
-    picked = {"name": None, "bytes": None}
-
-    def _bind_uploader(up: W.FileUpload):
-        # Robust handler for ipywidgets v7 & v8
-        def _update_from_value(v):
-            name = None; content = None
-            if isinstance(v, dict) and v:
-                name, meta = next(iter(v.items()))
-                content = meta.get("content")
-            elif isinstance(v, tuple) and v:
-                meta = v[0]
-                name = meta.get("name") or meta.get("metadata", {}).get("name")
-                content = meta.get("content")
-            if name and (content is not None):
-                picked["name"]  = name
-                picked["bytes"] = content
-                file_lbl.value  = name
-
-        def _cb(change):
-            _update_from_value(change["new"])
-        up.observe(_cb, names="value")
-
-        # Safety kicker: some Colab fronts miss the first trait event
-        def _kick():
-            time.sleep(0.15)
-            _update_from_value(up.value)
-        threading.Thread(target=_kick, daemon=True).start()
+    # keep selected file and the path we saved (after pressing Upload)
+    picked = {"name": None, "bytes": None, "saved_path": None}
 
     def _make_uploader():
         up = W.FileUpload(
             accept=".pdb,.ent,.txt,.gz",
             multiple=False,
-            description="Choose file",
-            layout=W.Layout(width="220px"),
+            description="Choose file (1)",
+            layout=W.Layout(width="230px"),
         )
-        _bind_uploader(up)
         return up
 
     pdb_upload = _make_uploader()
+    btn_upload = W.Button(description="Upload", icon="cloud-upload", tooltip="Save selected file", layout=W.Layout(width="120px"))
+
+    # Update label when a file is chosen (doesn't save yet)
+    def _on_choose(change):
+        # Support both ipywidgets v7 dict and v8 tuple formats
+        name = None
+        if isinstance(change["new"], dict) and change["new"]:
+            name = next(iter(change["new"].keys()))
+        elif isinstance(change["new"], tuple) and change["new"]:
+            name = (change["new"][0].get("name")
+                    or change["new"][0].get("metadata", {}).get("name"))
+        if name:
+            file_lbl.value = name
+            picked["name"] = name
+            picked["bytes"] = None  # will set on Upload click
+    pdb_upload.observe(_on_choose, names="value")
+
+    def _do_upload():
+        """Read bytes from widget and save to /content; update picked info."""
+        # Extract file content safely for both v7 and v8
+        val = pdb_upload.value
+        name, content = None, None
+        if isinstance(val, dict) and val:
+            name, meta = next(iter(val.items()))
+            content = meta.get("content")
+        elif isinstance(val, tuple) and val:
+            meta = val[0]
+            name = meta.get("name") or meta.get("metadata", {}).get("name")
+            content = meta.get("content")
+
+        if not name or content is None:
+            raise ValueError("Please choose a file first.")
+
+        # Save locally
+        path = os.path.join(os.getcwd(), name)
+        with open(path, "wb") as f:
+            f.write(content)
+
+        picked["name"] = name
+        picked["bytes"] = content
+        picked["saved_path"] = path
+        file_lbl.value = f"{name} (uploaded)"
+
+        return path
+
+    def _auto_upload_if_needed():
+        """If user picked a file but didn't press Upload, try once."""
+        if picked["saved_path"] is None:
+            try:
+                return _do_upload()
+            except Exception:
+                return None
+        return picked["saved_path"]
 
     # --- Base fields ---
     chain_id = W.Text(value=str(cfg.get("chain_id", "A")), description="Chain ID:")
@@ -162,8 +189,10 @@ def launch(
     btn_clear  = W.Button(description="Clear",  button_style="warning", icon="trash")
     out        = W.Output()
 
-    # --- Layout ---
-    pdb_row = W.HBox([pdb_code, W.HTML("&nbsp;"), W.HTML("<b>or</b>"), pdb_upload, file_lbl])
+    # --- Layout: put Upload button right next to Choose file ---
+    upload_row = W.HBox([pdb_upload, btn_upload, file_lbl], layout=W.Layout(align_items="center"))
+    pdb_row = W.HBox([pdb_code, W.HTML("&nbsp;"), W.HTML("<b>or</b>"), upload_row])
+
     functional_box = W.VBox([pl_mode_big, pl_dd_big, pl_txt_big])
     mode2_box = W.VBox([init_idx, init_chain, pl_mode_short, pl_dd_short, pl_txt_short, np_mode_2, np_dd_2, np_txt_2])
     mode3_box = W.VBox([init_idx, init_chain, final_idx, final_chain, np_mode_3, np_dd_3, np_txt_3])
@@ -194,24 +223,36 @@ def launch(
     display(W.VBox(children))
 
     # -------------------- handlers --------------------
+    def on_click_upload(_):
+        with out:
+            try:
+                path = _do_upload()
+                print(f"Saved local copy: {path}")
+            except Exception as e:
+                clear_output(wait=True)
+                print("❌", e)
+
+    btn_upload.on_click(on_click_upload)
+
     def on_clear(_):
         nonlocal pdb_upload
         pdb_code.value = ""
-        picked["name"] = None; picked["bytes"] = None
-        file_lbl.value = "No file chosen"
         chain_id.value = str(cfg.get("chain_id","A"))
         email.value = ""
         pred_type.value = "functional"
+        file_lbl.value = "No file chosen"
+        picked["name"] = None; picked["bytes"] = None; picked["saved_path"] = None
         pl_mode_big.value = "list"; pl_dd_big.value = pl_dd_big.options[0]; pl_txt_big.value = int(pl_dd_big.options[0])
         init_idx.value = 1; init_chain.value = ""
         pl_mode_short.value = "list"; pl_dd_short.value = pl_dd_short.options[0]; pl_txt_short.value = int(pl_dd_short.options[0])
         np_mode_2.value = "list"; np_dd_2.value = np_dd_2.options[0]; np_txt_2.value = int(np_dd_2.options[0])
         final_idx.value = 1; final_chain.value = ""
         np_mode_3.value = "list"; np_dd_3.value = np_dd_3.options[0]; np_txt_3.value = int(np_dd_3.options[0])
-        # recreate uploader because .value is read-only
+        # recreate upload widget (its .value is read-only)
         new_up = _make_uploader()
-        pdb_row.children = [pdb_code, W.HTML("&nbsp;"), W.HTML("<b>or</b>"), new_up, file_lbl]
+        new_up.observe(_on_choose, names="value")
         pdb_upload = new_up
+        upload_row.children = [pdb_upload, btn_upload, file_lbl]
         with out: clear_output()
 
     def _collect_pdb_bytes():
@@ -219,7 +260,7 @@ def launch(
             return picked["bytes"], picked["name"]
         code = pdb_code.value.strip()
         if not _is_valid_pdb_code(code):
-            raise ValueError("PDB code must be exactly 4 alphanumeric characters (or upload a file).")
+            raise ValueError("PDB code must be exactly 4 alphanumeric characters (or upload+click Upload).")
         return _fetch_rcsb(code), f"{code.upper()}.pdb"
 
     def _run_python_readpdb(saved_path: str, chain: str):
@@ -249,11 +290,23 @@ def launch(
                 if not _is_valid_email(email.value.strip()):
                     raise ValueError("Invalid email format.")
 
-                pdb_bytes, pdb_name = _collect_pdb_bytes()
-                save_path = os.path.join(os.getcwd(), pdb_name)
-                with open(save_path, "wb") as f:
-                    f.write(pdb_bytes)
-                print(f"Saved local copy: {save_path}")
+                # If a file is chosen but not uploaded, try once automatically
+                if picked["name"] and picked["saved_path"] is None:
+                    try:
+                        _do_upload()
+                        print(f"Saved local copy: {picked['saved_path']}")
+                    except Exception as e:
+                        print("ℹ️ Auto-upload failed, falling back to PDB code if provided. Details:", e)
+
+                if picked["bytes"] is not None:
+                    pdb_bytes, pdb_name = picked["bytes"], picked["name"]
+                    save_path = picked["saved_path"]
+                else:
+                    pdb_bytes, pdb_name = _collect_pdb_bytes()
+                    save_path = os.path.join(os.getcwd(), pdb_name)
+                    with open(save_path, "wb") as f:
+                        f.write(pdb_bytes)
+                    print(f"Saved local copy: {save_path}")
 
                 cor_path = None
                 if run_python_readpdb:
