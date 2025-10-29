@@ -1,27 +1,36 @@
 # mcpath/ui.py
-import os, re, requests, yaml
+import os, re, io, requests, yaml
 from IPython.display import display, clear_output
 import ipywidgets as W
 
-# --- NEW: import the Python reader ---
+# Try to import the local Python parser; optional
+_rps = None
 try:
-    from mcpath import readpdb_strict
-    _HAS_READPDB_PY = True
+    # when installed as a package
+    from . import readpdb_strict as _rps  # type: ignore
 except Exception:
-    _HAS_READPDB_PY = False
+    try:
+        # when running from a flat directory
+        import readpdb_strict as _rps  # type: ignore
+    except Exception:
+        _rps = None
 
 # -------------------- validators & helpers --------------------
-def _is_valid_pdb_code(c): return bool(re.fullmatch(r"[0-9A-Za-z]{4}", c.strip()))
-def _is_valid_chain(ch):   return bool(re.fullmatch(r"[A-Za-z0-9]", ch.strip()))
-def _is_valid_email(s):    return (not s.strip()) or bool(re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", s.strip()))
+def _is_valid_pdb_code(c): return bool(re.fullmatch(r"[0-9A-Za-z]{4}", (c or "").strip()))
+def _is_valid_chain(ch):   return bool(re.fullmatch(r"[A-Za-z0-9]", (ch or "").strip()))
+def _is_valid_email(s):    return (not (s or "").strip()) or bool(re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", (s or "").strip()))
 
 def _fetch_rcsb(code: str) -> bytes:
     url = f"https://files.rcsb.org/download/{code.upper()}.pdb"
     r = requests.get(url, timeout=60); r.raise_for_status()
     return r.content
 
-def _list_or_custom(label: str, options, default_value, minv, maxv, step=1):
+def _list_or_custom(label: str, options, default_value, minv, maxv=None, step=1, **kwargs):
     """Factory for a (List|Custom) toggle + Dropdown + BoundedIntText trio."""
+    # Back-compat: allow callers to pass max=...
+    if maxv is None and "max" in kwargs:
+        maxv = kwargs["max"]
+
     options = sorted({int(x) for x in options})
     default_value = int(default_value)
     if default_value not in options:
@@ -29,7 +38,7 @@ def _list_or_custom(label: str, options, default_value, minv, maxv, step=1):
 
     mode = W.ToggleButtons(options=[("List","list"), ("Custom","custom")], value="list", description="Input:")
     dd   = W.Dropdown(options=options, value=default_value, description=label)
-    txt  = W.BoundedIntText(value=default_value, min=minv, max=maxv, step=step, description=label)
+    txt  = W.BoundedIntText(value=default_value, min=int(minv), max=int(maxv or minv), step=int(step), description=label)
 
     def _sync(*_):
         if mode.value == "list":
@@ -63,15 +72,52 @@ def _logo_widget(branding: dict):
         # If the URL fails, just skip the logo silently
         return None
 
+# -------------------- FileUpload (v7 & v8 compatible) --------------------
+def _fu_has_file(upload_widget: W.FileUpload) -> bool:
+    v = getattr(upload_widget, "value", None)
+    if v is None:
+        return False
+    if isinstance(v, dict):
+        return len(v) > 0                       # ipywidgets v7
+    if isinstance(v, (tuple, list)):
+        return len(v) > 0                       # ipywidgets v8
+    return False
+
+def _fu_first(upload_widget: W.FileUpload):
+    """
+    Returns (filename:str|None, content:bytes|None) for the first uploaded file.
+    Supports ipywidgets v7 (dict) and v8 (tuple/list of UploadedFile).
+    """
+    v = getattr(upload_widget, "value", None)
+
+    # v7: dict -> {"name": {"content": b"...", "metadata": ...}, ...}
+    if isinstance(v, dict) and v:
+        fname = next(iter(v.keys()))
+        meta = v[fname]
+        content = meta.get("content") if isinstance(meta, dict) else getattr(meta, "content", None)
+        return fname, content
+
+    # v8: tuple/list of UploadedFile objects (or dict-like)
+    if isinstance(v, (tuple, list)) and v:
+        uf = v[0]
+        fname = getattr(uf, "name", None) or (uf.get("name") if isinstance(uf, dict) else None)
+        content = getattr(uf, "content", None) or (uf.get("content") if isinstance(uf, dict) else None)
+        return fname, content
+
+    return None, None
+
 # -------------------- main UI --------------------
 def launch(
     defaults_url="https://raw.githubusercontent.com/enesemretas/mcpath-colab/main/config/defaults.yaml",
     show_title="MCPath-style Parameters"
 ):
-    """Launches the MCPath parameter form (UI only + Python readpdb integration)."""
+    """Launches the MCPath parameter form (UI only)."""
     cfg = yaml.safe_load(requests.get(defaults_url, timeout=30).text)
-    target_url = cfg.get("target_url", "").strip()
+    target_url = (cfg.get("target_url") or "").strip()
     FN = cfg["field_names"]
+
+    # If present in your YAML and True, we will run the local Python readpdb_strict after submit
+    run_python_readpdb = bool(cfg.get("run_python_readpdb_after_submit", False))
 
     # ---------- Branding / logo ----------
     logo = _logo_widget(cfg.get("branding", {}))
@@ -79,13 +125,13 @@ def launch(
     # ---------- PDB: code OR upload (with "or" & filename label) ----------
     pdb_code   = W.Text(value=str(cfg.get("pdb_code", "")), description="PDB code:")
     or_lbl     = W.HTML("<b>&nbsp;&nbsp;or&nbsp;&nbsp;</b>")
-    pdb_upload = W.FileUpload(accept=".pdb", multiple=False, description="Choose File")
+    pdb_upload = W.FileUpload(accept=".pdb", multiple=False, description="Choose .pdb")
     file_lbl   = W.Label("No file chosen")
 
     def _on_upload_change(change):
-        if pdb_upload.value:
-            fname = next(iter(pdb_upload.value.keys()))
-            file_lbl.value = fname
+        if _fu_has_file(pdb_upload):
+            fname, _ = _fu_first(pdb_upload)
+            file_lbl.value = fname or "1 file"
         else:
             file_lbl.value = "No file chosen"
     pdb_upload.observe(_on_upload_change, names="value")
@@ -197,11 +243,13 @@ def launch(
     # -------------------- handlers --------------------
     def on_clear(_):
         pdb_code.value = ""
+        # reset upload widget value for both ipywidgets v8 and v7
         try:
-            pdb_upload.value.clear()
+            pdb_upload.value = ()     # v8
         except Exception:
-            pdb_upload.value = {}
+            pdb_upload.value = {}     # v7
         file_lbl.value = "No file chosen"
+
         chain_id.value = ""
         email.value = ""
         pred_type.value = "functional"
@@ -215,35 +263,54 @@ def launch(
         with out: clear_output()
 
     def _collect_pdb_bytes():
-        if pdb_upload.value:
-            (fname, meta) = next(iter(pdb_upload.value.items()))
-            return meta["content"], fname
+        if _fu_has_file(pdb_upload):
+            fname, content = _fu_first(pdb_upload)
+            if not content:
+                raise ValueError("Uploaded file is empty or unreadable.")
+            return content, fname
         code = pdb_code.value.strip()
         if not _is_valid_pdb_code(code):
             raise ValueError("PDB code must be exactly 4 alphanumeric characters (or upload a file).")
         return _fetch_rcsb(code), f"{code.upper()}.pdb"
 
-    def _run_python_readpdb(local_path:str, chain:str):
-        """Run Python-only readpdb and print a short preview."""
-        if not _HAS_READPDB_PY:
-            print("⚠️ Python readpdb module (mcpath.readpdb_strict) not found; skipping local parse.")
-            return None
+    def _maybe_run_local_readpdb(pdb_path: str, chain: str):
+        """Optionally run Python readpdb_strict (if available) and preview .cor head."""
+        if not run_python_readpdb:
+            return
+        if _rps is None:
+            print("ℹ️ readpdb_strict.py not found in environment; skipping local parse.")
+            return
+
         try:
-            print("▶ Running Python readpdb…")
-            cor_path, n_rows, n_prob = readpdb_strict.readpdb_py(local_path, chain)
-            print(f"✅ readpdb finished — rows: {n_rows}, problems: {n_prob}")
-            if os.path.exists(cor_path):
-                print(f"\nPreview of {os.path.basename(cor_path)}:")
-                with open(cor_path, "r", encoding="utf-8", errors="ignore") as fh:
-                    for i, line in enumerate(fh):
-                        if i >= 10: break
-                        print(line.rstrip())
+            # discover callable
+            runner = None
+            for name in ("run", "run_readpdb", "readpdb"):
+                if hasattr(_rps, name):
+                    runner = getattr(_rps, name)
+                    break
+
+            if runner is None:
+                print("ℹ️ readpdb_strict has no callable (run/run_readpdb/readpdb); skipping.")
+                return
+
+            print("▶ Running Python readpdb_strict…")
+            # Most implementations accept (pdb_path, chain_id, out_basename=None, strict_matlab_mode=True/False)
+            try:
+                runner(pdb_path, chain, out_basename=os.path.basename(pdb_path), strict_matlab_mode=True)
+            except TypeError:
+                # Fallback: maybe only (pdb_path, chain)
+                runner(pdb_path, chain)
+
+            cor_file = pdb_path + ".cor"
+            if os.path.exists(cor_file):
+                with open(cor_file, "r") as f:
+                    head = "".join([next(f) for _ in range(8) if True])
+                print(f"✅ Wrote: {cor_file}\n\n— .cor preview (first lines) —\n{head}")
             else:
-                print("⚠️ .cor output not found.")
-            return cor_path
+                print("⚠️ No .cor file produced by readpdb_strict.")
+
         except Exception as e:
-            print("❌ readpdb_py error:", e)
-            return None
+            print("⚠️ readpdb_strict failed:", e)
 
     def on_submit(_):
         with out:
@@ -267,6 +334,8 @@ def launch(
                     data[FN["pdb_code"]] = pdb_code.value.strip().upper()
                 if email.value.strip():
                     data[FN["email"]] = email.value.strip()
+
+                files = {FN["pdb_file"]: (pdb_name, pdb_bytes, "chemical/x-pdb")}
 
                 # mode-specific fields
                 if pred_type.value == "functional":
@@ -293,26 +362,24 @@ def launch(
                         "number_paths":  int(get_num_paths_3()),
                     })
 
-                # Save PDB locally (in current working directory)
+                # Save a local copy of the PDB for the user (and for local parser)
                 with open(pdb_name, "wb") as f:
                     f.write(pdb_bytes)
-                print(f"Saved local copy: {os.path.join(os.getcwd(), pdb_name)}")
+                print(f"Saved local copy: {os.getcwd()}/{pdb_name}")
 
-                # --- NEW: always run local Python readpdb and show preview ---
-                cor_maybe = _run_python_readpdb(pdb_name, chain_global)
+                # (Optional) run Python readpdb_strict locally and preview .cor
+                _maybe_run_local_readpdb(os.path.abspath(pdb_name), chain_global)
 
-                # If you want to POST to your server as before, keep this:
                 if not target_url:
+                    # preview only
                     print("\n(No target_url set) — preview only payload below:\n")
                     preview = dict(data)
                     preview["attached_file"] = pdb_name
-                    if cor_maybe and os.path.exists(cor_maybe):
-                        preview["generated_cor"] = os.path.basename(cor_maybe)
                     print(preview)
                     return
 
-                files = {FN["pdb_file"]: (pdb_name, pdb_bytes, "chemical/x-pdb")}
-                print(f"\nSubmitting to {target_url} …")
+                # real POST
+                print(f"Submitting to {target_url} …")
                 r = requests.post(target_url, data=data, files=files, timeout=180)
                 print("HTTP", r.status_code)
                 try:
