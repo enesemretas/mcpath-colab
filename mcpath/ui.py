@@ -693,43 +693,90 @@ end
                         f.write(runner)
 
                     # --- Ensure Octave is present and run ---
-                    print("▶ Launching Octave… (timeout=180s)")
+                    # --- Ensure Octave is present and run (hardened) ---
+                    print("▶ Launching Octave… (timeout=420s)")
                     try:
-                        octave_cmd = _ensure_octave_and_pick_cmd()
+                        # 1) Find (or install) Octave and print path
+                        octave_cmd = _ensure_octave_and_pick_cmd(install_timeout=420)
+                        print(f"Using Octave at: {octave_cmd}")
+
+                        # 2) Print version to verify the binary is runnable
+                        try:
+                            ver = subprocess.run([octave_cmd, "--version"], text=True, capture_output=True, timeout=30)
+                            print("Octave version:\n", (ver.stdout or ver.stderr)[:2000])
+                        except Exception as e_ver:
+                            print("WARN: could not query Octave version:", e_ver)
+
+                        # 3) Quick smoke test (fail fast if the CLI is broken)
+                        try:
+                            smoke = subprocess.run(
+                                [octave_cmd, "-qf", "--no-gui", "--no-window-system",
+                                 "--eval", "disp('OCTAVE_SMOKE_OK'); exit(0);"],
+                                text=True, capture_output=True, timeout=30
+                            )
+                            if smoke.returncode != 0 or "OCTAVE_SMOKE_OK" not in (smoke.stdout + smoke.stderr):
+                                print("WARN: Octave smoke test output:\n", (smoke.stdout + smoke.stderr)[:1000])
+                                raise RuntimeError("Octave smoke test failed")
+                        except Exception as e_smoke:
+                            print("❌ Octave smoke test failed:", e_smoke)
+                            raise
+
+                        # 4) Run your runner script with a robust --eval wrapper that always exits
+                        eval_code = (
+                            "try, run('run_mcpath.m'); "
+                            "catch err, "
+                            "  disp('RUNNER_ERROR_BEGIN'); "
+                            "  disp(getReport(err, 'extended')); "
+                            "  disp('RUNNER_ERROR_END'); "
+                            "  exit(1); "
+                            "end; "
+                            "exit(0);"
+                        )
+
                         proc = subprocess.run(
-                            [octave_cmd, "-qf", "--no-gui", "--eval", f"run('run_mcpath.m');"],
-                            text=True, timeout=180
+                            [octave_cmd, "-qf", "--no-gui", "--no-window-system", "--eval", eval_code],
+                            text=True, capture_output=True, timeout=420
                         )
                         rc = proc.returncode
+                        if proc.stdout:
+                            print("\n--- Octave STDOUT (tail) ---\n", proc.stdout[-2000:])
+                        if proc.stderr:
+                            print("\n--- Octave STDERR (tail) ---\n", proc.stderr[-2000:])
+
                     except subprocess.TimeoutExpired:
-                        print("❌ Octave timed out after 180s. Check /content/octave.log")
+                        print("❌ Octave timed out after 420s. Check /content/octave.log")
                         rc = -1
                     except FileNotFoundError as e:
                         print("❌", e)
                         rc = -2
+                    except Exception as e:
+                        print("❌ Unexpected error launching Octave:", e)
+                        rc = -3
 
-                    # Show diary tail
+                    # Show diary tail and error file (if created by run_mcpath.m)
                     log_path = os.path.join(SAVE_DIR_REAL, "octave.log")
                     if os.path.exists(log_path):
                         try:
                             with open(log_path, "r") as lf:
                                 log = lf.read()
-                            tail = log[-2000:] if len(log) > 2000 else log
+                            tail = log[-4000:] if len(log) > 4000 else log
                             print("\n--- octave.log (tail) ---\n", tail)
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            print("WARN: could not read octave.log:", e)
+
+                    err_file = os.path.join(SAVE_DIR_REAL, "error")
+                    if os.path.exists(err_file):
+                        try:
+                            with open(err_file, "r") as ef:
+                                print("\n--- error file ---\n", ef.read()[:4000])
+                        except Exception as e:
+                            print("WARN: could not read error file:", e)
 
                     if rc != 0:
-                        err_file = os.path.join(SAVE_DIR_REAL, "error")
-                        if os.path.exists(err_file):
-                            with open(err_file, "r") as ef:
-                                print("\n--- error file ---\n", ef.read()[:2000])
                         print("❌ Octave failed. Return code:", rc)
                     else:
                         print("✅ Octave finished successfully.")
 
-            except Exception as e:
-                print("❌", e)
 
     btn_clear.on_click(on_clear)
     btn_submit.on_click(on_submit)
