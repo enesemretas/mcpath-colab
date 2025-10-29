@@ -692,7 +692,6 @@ end
                     with open(runner_path, "w") as f:
                         f.write(runner)
 
-                    # --- Ensure Octave is present and run ---
                     # --- Ensure Octave is present and run (hardened) ---
                     print("▶ Launching Octave… (timeout=420s)")
                     try:
@@ -777,6 +776,8 @@ end
                     else:
                         print("✅ Octave finished successfully.")
 
+            except Exception as e:   # <-- this 'except' closes the outer try
+                print("❌", e)
 
     btn_clear.on_click(on_clear)
     btn_submit.on_click(on_submit)
