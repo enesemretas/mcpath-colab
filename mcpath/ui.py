@@ -164,7 +164,6 @@ def _list_or_custom(label: str, options, default_value, minv, maxv, step=1, desc
         layout=common_layout, style=desc_style
     )
 
-    # Only one visible at a time
     container = W.VBox([dd])
     def _on_mode(change):
         container.children = [dd] if change["new"] == "list" else [txt]
@@ -340,7 +339,6 @@ def launch(
     # -------------------- handlers --------------------
     def on_clear(_):
         pdb_code.value = ""
-        # More robust reset for FileUpload (clear() may not exist in some versions)
         try:
             pdb_upload.value.clear()
         except Exception:
@@ -430,7 +428,8 @@ def launch(
                         (init_chain.value or "").strip(),
                         str(int(final_idx.value)),
                         (final_chain.value or "").strip(),
-                        email.value.strip() or "-"
+                        email.value.strip() or "-",
+                        str(int(get_num_paths_3())),
                     ]
 
                 with open(input_path, "w") as f:
@@ -526,7 +525,56 @@ def launch(
                         print("❌ readpdb.m not found. Set readpdb_url in config or place it in mcpath-colab/matlab/")
                         return
 
-                    # Runner with diary + fail fast
+                    # === Ensure atomistic.m, infinite.m, and required data files ===
+                    def _ensure_file(target_path, local_candidates=(), url_key=None, human_name=None):
+                        """Write file to target_path from first available source: local_candidates then cfg[url_key]."""
+                        os.makedirs(os.path.dirname(target_path), exist_ok=True)
+                        # 1) local candidates
+                        for lc in local_candidates:
+                            try:
+                                if lc and os.path.exists(lc):
+                                    with open(lc, "rb") as src, open(target_path, "wb") as dst:
+                                        dst.write(src.read())
+                                    print(f"Saved {human_name or os.path.basename(target_path)} from local: {lc}")
+                                    return True
+                            except Exception as e:
+                                print(f"WARN: copy failed for {lc}: {e}")
+                        # 2) URL fallback
+                        if url_key and cfg.get(url_key):
+                            try:
+                                url = cfg[url_key].strip()
+                                print(f"Fetching {human_name or os.path.basename(target_path)} (≤15s): {url}")
+                                rb = requests.get(url, timeout=15).content
+                                with open(target_path, "wb") as f: f.write(rb)
+                                print(f"Saved: {target_path}")
+                                return True
+                            except Exception as e:
+                                print(f"WARN: failed to fetch {human_name or target_path}: {e}")
+                        return False
+
+                    atomistic_m   = os.path.join(SAVE_DIR_REAL, "atomistic.m")
+                    infinite_m    = os.path.join(SAVE_DIR_REAL, "infinite.m")
+                    vdw_param     = os.path.join(SAVE_DIR_REAL, "vdw_cns.param")
+                    pdb_top       = os.path.join(SAVE_DIR_REAL, "pdb_cns.top")
+
+                    _ensure_file(atomistic_m,
+                                 local_candidates=["/content/mcpath-colab/matlab/atomistic.m"],
+                                 url_key="atomistic_url", human_name="atomistic.m")
+                    _ensure_file(infinite_m,
+                                 local_candidates=["/content/mcpath-colab/matlab/infinite.m"],
+                                 url_key="infinite_url", human_name="infinite.m")
+                    _ensure_file(vdw_param,
+                                 local_candidates=["/content/mcpath-colab/matlab/vdw_cns.param"],
+                                 url_key="vdw_param_url", human_name="vdw_cns.param")
+                    _ensure_file(pdb_top,
+                                 local_candidates=["/content/mcpath-colab/matlab/pdb_cns.top"],
+                                 url_key="pdb_top_url", human_name="pdb_cns.top")
+
+                    for must in [atomistic_m, infinite_m, vdw_param, pdb_top]:
+                        if not os.path.exists(must):
+                            print(f"❌ Required file missing: {must}. Provide local copy or set its URL in config.")
+
+                    # Runner with diary + full pipeline
                     runner_path = os.path.join(SAVE_DIR_REAL, "run_mcpath.m")
                     extra_paths = cfg.get("matlab_paths", []) or []
                     addpath_lines = ""
@@ -535,34 +583,121 @@ def launch(
                         addpath_lines += f"addpath(genpath('{p_esc}'));\n"
                     addpath_lines += "addpath(genpath('/content')); addpath(genpath('/content/mcpath-colab'));\n"
 
+                    cd_escaped = SAVE_DIR_REAL.replace("'", "''")
                     runner = f"""
 diary off; diary('octave.log');  % start logging
 try
   {addpath_lines}
+  cd('{cd_escaped}');
   if exist('readpdb','file') ~= 2, error('readpdb.m not on path'); end
+  if exist('atomistic','file') ~= 2, warning('atomistic.m not found on path'); end
+  if exist('infinite','file')  ~= 2, warning('infinite.m not found on path'); end
+
+  % --- Read mcpath_input.txt ---
   fid = fopen('mcpath_input.txt','r'); assert(fid>0,'cannot open mcpath_input.txt');
   a = {{}}; line = fgetl(fid);
-  while ischar(line), a{{end+1,1}} = line; line = fgetl(fid); end
+  while ischar(line), a{{end+1,1}} = strtrim(line); line = fgetl(fid); end
   fclose(fid);
-  fprintf('Running readpdb on %%s (chain %%s)\\n', a{{2}}, a{{3}});
-  readpdb(a{{2}}, a{{3}});
+
+  % a{{1}} = mode
+  % a{{2}} = pdb filename
+  % a{{3}} = global chain
+  % functional (mode=1): a{{4}}=path_length
+  % paths_init_len (mode=2): a{{4}}=LengthOfPaths, a{{5}}=NumberPaths, a{{6}}=InitIndex, a{{7}}=InitChain
+  % paths_init_final (mode=3): a{{4}}=InitIndex, a{{5}}=InitChain, a{{6}}=FinalIndex, a{{7}}=FinalChain, a{{8}}=NumberPaths
+
+  fprintf('Running readpdb on %s (chain %s)\\n', a{{2}}, a{{3}});
+  readpdb(a{{2}}, a{{3}});  % user main parser
+
+  % --- Derive steps for infinite() depending on mode ---
+  mode = str2double(a{{1}});
+  steps = 0;
+  if mode == 1
+      steps = str2double(a{{4}});   % big path length
+  elseif mode == 2
+      steps = str2double(a{{4}});   % short path length
+  elseif mode == 3
+      if numel(a) >= 8
+          steps = str2double(a{{8}});  % reuse number_paths as step proxy
+      else
+          steps = 1000;
+      end
+  else
+      steps = 1000;
+  end
+  if ~isfinite(steps) || steps <= 0
+      steps = 1000;
+  end
+
+  % --- Call atomistic & infinite if available ---
+  if exist('atomistic','file') == 2
+      fprintf('Running atomistic(%s)\\n', a{{2}});
+      try
+          atomistic(a{{2}});
+      catch atomErr
+          warning('atomistic() failed: %s', atomErr.message);
+      end
+  else
+      warning('atomistic.m missing — skipping atomistic()');
+  end
+
+  if exist('infinite','file') == 2
+      fprintf('Running infinite(%s, %d)\\n', a{{2}}, steps);
+      try
+          infinite(a{{2}}, steps);
+      catch infErr
+          warning('infinite() failed: %s', infErr.message);
+      end
+  else
+      warning('infinite.m missing — skipping infinite()');
+  end
+
+  % --- Normalize outputs to coor_file, atom_file, path_file (auto-suffix if exist) ---
+  coor_src = [a{{2}} '.cor'];
+  atom_src = [a{{2}} '_atomistic.out'];
+  path_src = [a{{2}} '_atomistic_' num2str(steps) 'steps_infinite.path'];
+
+  function tf = copy_to_free_name(src, dst_base)
+      tf = false;
+      if exist(src, 'file') ~= 2, return; end
+      dst = dst_base;
+      k = 1;
+      while exist(dst, 'file') == 2
+          dst = sprintf('%s.%d', dst_base, k);
+          k = k + 1;
+      end
+      try
+          copyfile(src, dst);
+          tf = true;
+          fprintf('Saved %s -> %s\\n', src, dst);
+      catch
+          warning('Failed to copy %s -> %s', src, dst);
+      end
+  end
+
+  copy_to_free_name(coor_src, 'coor_file');
+  copy_to_free_name(atom_src, 'atom_file');
+  copy_to_free_name(path_src, 'path_file');
+
   diary off; exit(0);
 catch err
   fiderr = fopen('error','w');
-  if fiderr>0, fprintf(fiderr,'ERROR: %s\\n', err.message); fclose(fiderr); end
+  if fiderr>0
+      fprintf(fiderr,'ERROR: %s\\n', err.message);
+      fclose(fiderr);
+  end
   diary off; exit(1);
 end
 """
                     with open(runner_path, "w") as f:
                         f.write(runner)
 
-                    # --- Ensure Octave is present and pick command ---
+                    # --- Ensure Octave is present and run ---
                     print("▶ Launching Octave… (timeout=180s)")
                     try:
                         octave_cmd = _ensure_octave_and_pick_cmd()
-                        cd_escaped = SAVE_DIR_REAL.replace("'", "''")
                         proc = subprocess.run(
-                            [octave_cmd, "-qf", "--no-gui", "--eval", f"cd('{cd_escaped}'); run('run_mcpath.m');"],
+                            [octave_cmd, "-qf", "--no-gui", "--eval", f"run('run_mcpath.m');"],
                             text=True, timeout=180
                         )
                         rc = proc.returncode
