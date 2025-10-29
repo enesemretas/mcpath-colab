@@ -781,3 +781,28 @@ end
 
     btn_clear.on_click(on_clear)
     btn_submit.on_click(on_submit)
+# --- Auto-launch in Colab so the form is ready to fill immediately ---
+
+def _in_colab():
+    try:
+        import google.colab  # type: ignore
+        return True
+    except Exception:
+        return False
+
+def autolaunch(defaults_url: str = "https://raw.githubusercontent.com/enesemretas/mcpath-colab/main/config/defaults.yaml"):
+    """Manually trigger the UI (useful outside Colab or if autolaunch is disabled)."""
+    try:
+        launch(defaults_url=defaults_url)
+    except Exception as e:
+        print("❌ autolaunch() failed:", e)
+
+# Auto-run when imported in Colab (can be disabled via MCPATH_AUTOLAUNCH=0)
+if os.environ.get("MCPATH_AUTOLAUNCH", "1") == "1" and _in_colab():
+    try:
+        from IPython import get_ipython
+        if get_ipython() is not None:
+            print("🔧 Auto-launching MCPath form…")
+            autolaunch()
+    except Exception as _e:
+        print("⚠️ Auto-launch skipped:", _e)
