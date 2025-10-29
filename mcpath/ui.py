@@ -543,7 +543,6 @@ def launch(
                     def _ensure_file(target_path, local_candidates=(), url_key=None, human_name=None):
                         """Write file to target_path from first available source: local_candidates then cfg[url_key]."""
                         os.makedirs(os.path.dirname(target_path), exist_ok=True)
-                        # 1) local candidates
                         for lc in local_candidates:
                             try:
                                 if lc and os.path.exists(lc):
@@ -553,7 +552,6 @@ def launch(
                                     return True
                             except Exception as e:
                                 print(f"WARN: copy failed for {lc}: {e}")
-                        # 2) URL fallback
                         if url_key and cfg.get(url_key):
                             try:
                                 url = cfg[url_key].strip()
@@ -715,10 +713,11 @@ end
                             print("❌ Octave smoke test failed:", e_smoke)
                             raise
 
-                        # Run runner (correct cwd + self-contained eval)
+                        # Run runner (avoid nested-escape bug)
+                        save_dir_escaped = SAVE_DIR_REAL.replace("'", "''")
                         eval_code = (
                             "try, "
-                            f"  cd('{SAVE_DIR_REAL.replace(\"'\", \"''\")}'); "
+                            f"  cd('{save_dir_escaped}'); "
                             "  disp('RUN_EVAL_CALLING_RUN_MCPATH'); fflush(stdout); "
                             "  run('run_mcpath.m'); "
                             "catch err, "
