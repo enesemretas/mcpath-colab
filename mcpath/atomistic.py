@@ -254,7 +254,7 @@ def map_eps_sigma(atoms, top_map, vdw_map):
     keep_idx = np.array(keep_idx, dtype=int)
     # Slice atoms down to only those successfully mapped
     filtered_atoms = {
-        k: (v[keep_idx] if isinstance(v, np.ndarray) else [v[j] for j in keep_idx])
+        k: (val[keep_idx] if isinstance(val, np.ndarray) else [val[j] for j in keep_idx])
         if k in ("serial", "resseq", "xyz") else
         ([atoms[k][j] for j in keep_idx] if isinstance(atoms[k], list) else atoms[k])
         for k in atoms.keys()
