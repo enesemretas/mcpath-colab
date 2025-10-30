@@ -27,43 +27,71 @@ def _logo_widget(branding: dict):
     except Exception:
         return None
 
-# --- Inline 'List | Custom | Value' row ---
-def _list_or_custom(label: str, options, default_value, minv, maxv, step=1, desc_style=None):
+# --- Single row: "<Label> : [List | Custom]  <value-widget>"
+def _list_or_custom_row(label: str, options, default_value, minv, maxv, step=1):
+    """
+    Returns:
+      row   : HBox(label | toggle | value)
+      parts : dict{ 'toggle','dropdown','intbox','get','set_list','set_custom' }
+    """
     options = sorted({int(x) for x in options})
     default_value = int(default_value)
     if default_value not in options:
         options = sorted(options + [default_value])
 
-    btns = W.ToggleButtons(
+    # left label
+    lbl = W.Label(f"{label if label.endswith(':') else label + ':'}", layout=W.Layout(width="180px"))
+
+    # horizontal toggle buttons
+    toggle = W.ToggleButtons(
         options=[("List", "list"), ("Custom", "custom")],
         value="list",
         description="",
-        layout=W.Layout(width="180px", margin="0 12px 0 0"),
-        style=desc_style
+        style={'button_width': '120px'},
+        layout=W.Layout(display="flex", flex_flow="row", width="260px", margin="0 12px 0 0")
     )
-    dd = W.Dropdown(
+
+    # value widgets (no descriptions — label is separate)
+    dropdown = W.Dropdown(
         options=options, value=default_value,
-        description=(label if label.endswith(":") else f"{label}:"),
-        layout=W.Layout(width="420px", min_width="360px"),
-        style=desc_style
+        layout=W.Layout(width="280px", min_width="220px")
     )
-    itxt = W.BoundedIntText(
+    intbox = W.BoundedIntText(
         value=default_value, min=minv, max=maxv, step=step,
-        description=(label if label.endswith(":") else f"{label}:"),
-        layout=W.Layout(width="420px", min_width="360px"),
-        style=desc_style
+        layout=W.Layout(width="280px", min_width="220px")
     )
-    value_box = W.Box([dd], layout=W.Layout(align_items="center"))
+
+    # container that swaps dropdown/intbox
+    value_box = W.Box([dropdown], layout=W.Layout(align_items="center"))
 
     def _on_mode(ch):
-        value_box.children = [dd] if ch["new"] == "list" else [itxt]
-    btns.observe(_on_mode, names="value")
+        value_box.children = [dropdown] if ch["new"] == "list" else [intbox]
+    toggle.observe(_on_mode, names="value")
 
     def get_value():
-        return int(dd.value if btns.value == "list" else itxt.value)
+        return int(dropdown.value if toggle.value == "list" else intbox.value)
 
-    row = W.HBox([btns, value_box], layout=W.Layout(align_items="center", gap="12px"))
-    return row, btns, dd, itxt, get_value
+    def set_list(val):
+        # switch to list and set dropdown
+        toggle.value = "list"
+        if val not in dropdown.options:
+            dropdown.options = sorted({int(x) for x in list(dropdown.options) + [int(val)]})
+        dropdown.value = int(val)
+
+    def set_custom(val):
+        toggle.value = "custom"
+        intbox.value = int(val)
+
+    row = W.HBox([lbl, toggle, value_box],
+                 layout=W.Layout(align_items="center", gap="12px", width="auto"))
+    return row, {
+        'toggle': toggle,
+        'dropdown': dropdown,
+        'intbox': intbox,
+        'get': get_value,
+        'set_list': set_list,
+        'set_custom': set_custom
+    }
 
 # -------------------- main UI --------------------
 def launch(
@@ -82,7 +110,7 @@ def launch(
     # Branding / logo
     logo = _logo_widget(cfg.get("branding", {}))
 
-    DESC = {'description_width': '240px'}
+    DESC = {'description_width': '180px'}
     wide = W.Layout(width="420px", min_width="360px")
 
     # ---------- PDB: code OR upload ----------
@@ -92,7 +120,7 @@ def launch(
     pdb_upload = W.FileUpload(accept=".pdb", multiple=False, description="Choose file")
     file_lbl   = W.Label("No file chosen")
 
-    def _on_upload_change(change):
+    def _on_upload_change(_):
         if pdb_upload.value:
             fname = next(iter(pdb_upload.value.keys()))
             file_lbl.value = fname
@@ -125,10 +153,11 @@ def launch(
         1000000, 2000000, 3000000, 4000000
     ])
     big_default = int(cfg.get("path_length", big_opts[0] if big_opts else 100000))
-    row_big, pl_mode_big, pl_dd_big, pl_txt_big, get_big_len = _list_or_custom(
+    row_big, big_ctrl = _list_or_custom_row(
         label="Path length", options=big_opts, default_value=big_default,
-        minv=1, maxv=10_000_000, step=1000, desc_style=DESC
+        minv=1, maxv=10_000_000, step=1000
     )
+    get_big_len = big_ctrl['get']
 
     # ---------- Mode 2 ----------
     init_idx   = W.BoundedIntText(value=1, min=1, max=1_000_000, step=1,
@@ -138,15 +167,18 @@ def launch(
                         placeholder="A", layout=wide, style=DESC)
 
     short_len_opts = [5, 8, 10, 13, 15, 20, 25, 30]
-    row_short, pl_mode_short, pl_dd_short, pl_txt_short, get_short_len = _list_or_custom(
+    row_short, short_ctrl = _list_or_custom_row(
         label="Length of Paths", options=short_len_opts, default_value=5,
-        minv=1, maxv=10_000, step=1, desc_style=DESC
+        minv=1, maxv=10_000, step=1
     )
+    get_short_len = short_ctrl['get']
+
     num_paths_opts_mode2 = [1000, 2000, 3000, 5000, 10000, 20000, 30000, 40000, 50000]
-    row_np2, np_mode_2, np_dd_2, np_txt_2, get_num_paths_2 = _list_or_custom(
+    row_np2, np2_ctrl = _list_or_custom_row(
         label="Number of Paths", options=num_paths_opts_mode2, default_value=1000,
-        minv=1, maxv=10_000_000, step=100, desc_style=DESC
+        minv=1, maxv=10_000_000, step=100
     )
+    get_num_paths_2 = np2_ctrl['get']
 
     # ---------- Mode 3 ----------
     final_idx   = W.BoundedIntText(value=1, min=1, max=1_000_000, step=1,
@@ -154,11 +186,13 @@ def launch(
                                    layout=wide, style=DESC)
     final_chain = W.Text(value="", description="Chain of final residue:",
                          placeholder="B", layout=wide, style=DESC)
+
     num_paths_opts_mode3 = [1000, 2000, 3000, 5000, 10000, 30000, 50000]
-    row_np3, np_mode_3, np_dd_3, np_txt_3, get_num_paths_3 = _list_or_custom(
+    row_np3, np3_ctrl = _list_or_custom_row(
         label="Number of Paths", options=num_paths_opts_mode3, default_value=1000,
-        minv=1, maxv=10_000_000, step=100, desc_style=DESC
+        minv=1, maxv=10_000_000, step=100
     )
+    get_num_paths_3 = np3_ctrl['get']
 
     # Actions & output
     btn_submit = W.Button(description="Submit", button_style="success", icon="paper-plane")
@@ -212,32 +246,38 @@ def launch(
         chain_id.value = ""
         email.value = ""
 
-        # Reset file upload label (keep widget)
+        # Reset upload display/value safely
         file_lbl.value = "No file chosen"
-        try:
-            pdb_upload.value = ()
-        except Exception:
+        for attempt in ((), {}, None):
             try:
-                pdb_upload.value = {}
+                pdb_upload.value = attempt
+                break
             except Exception:
-                pass  # leave as-is if trait is read-only
+                pass
 
         # Reset prediction mode & visibility
         pred_type.value = "functional"
 
-        # Reset toggle rows to 'List'
-        pl_mode_big.value = "list"
-        pl_mode_short.value = "list"
-        np_mode_2.value = "list"
-        np_mode_3.value = "list"
+        # Reset the list/custom rows back to List & first option
+        big_ctrl['toggle'].value = "list"
+        short_ctrl['toggle'].value = "list"
+        np2_ctrl['toggle'].value = "list"
+        np3_ctrl['toggle'].value = "list"
 
-        # Reset numeric choices to first option in dropdowns
-        pl_dd_big.value    = pl_dd_big.options[0];    pl_txt_big.value    = int(pl_dd_big.options[0])
-        pl_dd_short.value  = pl_dd_short.options[0];  pl_txt_short.value  = int(pl_dd_short.options[0])
-        np_dd_2.value      = np_dd_2.options[0];      np_txt_2.value      = int(np_dd_2.options[0])
-        np_dd_3.value      = np_dd_3.options[0];      np_txt_3.value      = int(np_dd_3.options[0])
+        # first option or default
+        first = big_ctrl['dropdown'].options[0]
+        big_ctrl['dropdown'].value = first; big_ctrl['intbox'].value = int(first)
 
-        # Clear ONLY the log/output box (not the whole cell)
+        first = short_ctrl['dropdown'].options[0]
+        short_ctrl['dropdown'].value = first; short_ctrl['intbox'].value = int(first)
+
+        first = np2_ctrl['dropdown'].options[0]
+        np2_ctrl['dropdown'].value = first; np2_ctrl['intbox'].value = int(first)
+
+        first = np3_ctrl['dropdown'].options[0]
+        np3_ctrl['dropdown'].value = first; np3_ctrl['intbox'].value = int(first)
+
+        # Clear ONLY the log/output box (keep the form on screen)
         out.clear_output(wait=True)
 
     def _collect_pdb_bytes():
