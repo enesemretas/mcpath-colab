@@ -1,0 +1,53 @@
+ NONBonded  H       0.0498   1.4254      0.0498   1.4254
+ NONBonded  HA      0.0450   2.6157      0.0450   2.6157 !- charged group.
+ NONBonded  HC      0.0498   1.0691      0.0498   1.0691 !   Reduced vdw radius!
+ NONBonded  C       0.1200   3.7418      0.1000   3.3854 ! carbonyl carbon
+ NONBonded  C5      0.1200   3.7418      0.1000   3.3854 ! carbonyl carbon
+ NONBonded  C5W     0.1200   3.7418      0.1000   3.3854 ! carbonyl carbon
+ NONBonded  CF      0.1200   3.7418      0.1000   3.3854 ! carbonyl carbon
+ NONBonded  CW      0.1200   3.7418      0.1000   3.3854 ! carbonyl carbon
+ NONBonded  CY      0.1200   3.7418      0.1000   3.3854 ! carbonyl carbon
+ NONBonded  CY2     0.1200   3.7418      0.1000   3.3854 ! carbonyl carbon
+ NONBonded  CH1E    0.0486   4.2140      0.1000   3.3854 ! \
+ NONBonded  CH2E    0.1142   3.9823      0.1000   3.3854 !  extended carbons
+ NONBonded  CH2G    0.1142   3.9823      0.1000   3.3854 !  extended carbons
+ NONBonded  CH2P    0.1142   3.9823      0.1000   3.3854 !  extended carbons
+ NONBonded  CH3E    0.1811   3.8576      0.1000   3.3854 ! /
+ NONBonded  CR1E    0.1200   3.7418      0.1000   3.3854 !  ring carbons
+ NONBonded  CR1H    0.1200   3.7418      0.1000   3.3854 !  ring carbons
+ NONBonded  CR1W    0.1200   3.7418      0.1000   3.3854 !  ring carbons
+ NONBonded  CRHH    0.1200   3.7418      0.1000   3.3854 !  ring carbons
+ NONBonded  CRH     0.1200   3.7418      0.1000   3.3854 !  ring carbons!
+ NONBonded  N       0.2384   2.8509      0.2384   2.8509
+ NONBonded  NC2     0.2384   2.8509      0.2384   2.8509
+ NONBonded  NH1     0.2384   2.8509      0.2384   2.8509
+ NONBonded  NH2     0.2384   2.8509      0.2384   2.8509
+ NONBonded  NH3     0.2384   2.8509      0.2384   2.8509
+ NONBonded  NP      0.2384   2.8509      0.2384   2.8509
+ NONBonded  NR      0.2384   2.8509      0.2384   2.8509 !
+ NONBonded  O       0.1591   2.8509      0.1591   2.8509
+ NONBonded  OC      0.6469   2.8509      0.6469   2.8509
+ NONBonded  OH1     0.1591   2.8509      0.1591   2.8509 !
+ NONBonded  S       0.0430   3.3676      0.0430   3.3676
+ NONBonded  SM      0.0430   3.3676      0.0430   3.3676
+ NONBonded  SH1E    0.0430   3.3676      0.0430   3.3676
+ NONBonded  SE      0.0430   3.5100      0.0430   3.5100 ! guess PDA 9/16/97
+ !                                                       !
+ !                                                       !
+ !                                                       !
+ !                                                       !
+ !                                                       !
+ !                  eps     sigma       eps(1:4) sigma(1:4)
+ !                  (kcal/mol) (A)
+ !                  ---------------------------------------
+ !                                                       !
+set echo=true end
+ !                                                       !
+ !                                                       !
+{* nonbonding parameter section *}
+{* ============================ *}
+   nbonds                                    { This statement specifies the   }
+      atom cdie shift eps=1.0  e14fac=0.4    { nonbonded interaction energy   }
+      cutnb=7.5 ctonnb=6.0 ctofnb=6.5        { options.  Note the reduced     }
+      nbxmod=5 vswitch  tolerance=0.5        { nonbonding cutoff to save      }
+   end                                       { some CPU time                  }
