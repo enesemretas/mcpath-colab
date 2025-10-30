@@ -15,9 +15,11 @@ def _fetch_rcsb(code: str) -> bytes:
 
 def _list_or_custom(label: str, options, default_value, minv, maxv, step=1, desc_style=None):
     """
-    One-at-a-time input: a small container whose single child is either a Dropdown (List)
-    or a BoundedIntText (Custom). Returns:
-      (mode_toggle, container_box, dropdown_widget, int_text_widget, get_value_fn)
+    Inline 'List | Custom' selector.
+    Returns: (mode_toggle, container_box, dropdown, inttext, get_value_fn)
+
+    container_box will contain either the dropdown (List) or the int field (Custom),
+    so you can place: HBox([mode_toggle, container_box])
     """
     options = sorted({int(x) for x in options})
     default_value = int(default_value)
@@ -29,8 +31,8 @@ def _list_or_custom(label: str, options, default_value, minv, maxv, step=1, desc
     mode = W.ToggleButtons(
         options=[("List", "list"), ("Custom", "custom")],
         value="list",
-        description="Input:",
-        layout=W.Layout(width="240px"),
+        description="",  # inline; no 'Input:' label
+        layout=W.Layout(width="180px", margin="0 16px 0 0"),
         style=desc_style
     )
     dd = W.Dropdown(
@@ -46,7 +48,6 @@ def _list_or_custom(label: str, options, default_value, minv, maxv, step=1, desc
         style=desc_style
     )
 
-    # container holds the active input only
     container = W.VBox([dd])
 
     def _on_mode(change):
@@ -144,6 +145,8 @@ def launch(
         label="Path length", options=big_opts, default_value=big_default,
         minv=1, maxv=10_000_000, step=1000, desc_style=DESC
     )
+    row_big = W.HBox([pl_mode_big, pl_container_big],
+                     layout=W.Layout(align_items="center", gap="12px"))
 
     # ---------- Mode 2: initial residue + short path length + number of paths ----------
     init_idx   = W.BoundedIntText(value=1, min=1, max=1_000_000, step=1,
@@ -157,12 +160,16 @@ def launch(
         label="Length of Paths", options=short_len_opts, default_value=5,
         minv=1, maxv=10_000, step=1, desc_style=DESC
     )
+    row_short = W.HBox([pl_mode_short, pl_container_short],
+                       layout=W.Layout(align_items="center", gap="12px"))
 
     num_paths_opts_mode2 = [1000, 2000, 3000, 5000, 10000, 20000, 30000, 40000, 50000]
     (np_mode_2, np_container_2, np_dd_2, np_txt_2, get_num_paths_2) = _list_or_custom(
         label="Number of Paths", options=num_paths_opts_mode2, default_value=1000,
         minv=1, maxv=10_000_000, step=100, desc_style=DESC
     )
+    row_np2 = W.HBox([np_mode_2, np_container_2],
+                     layout=W.Layout(align_items="center", gap="12px"))
 
     # ---------- Mode 3: initial & final residues + number of paths ----------
     final_idx   = W.BoundedIntText(value=1, min=1, max=1_000_000, step=1,
@@ -176,6 +183,8 @@ def launch(
         label="Number of Paths", options=num_paths_opts_mode3, default_value=1000,
         minv=1, maxv=10_000_000, step=100, desc_style=DESC
     )
+    row_np3 = W.HBox([np_mode_3, np_container_3],
+                     layout=W.Layout(align_items="center", gap="12px"))
 
     # ---------- Actions & output ----------
     btn_submit = W.Button(description="Submit", button_style="success", icon="paper-plane")
@@ -187,16 +196,23 @@ def launch(
                      layout=W.Layout(align_items="center", justify_content="flex-start",
                                      flex_flow="row wrap", gap="10px"))
 
-    functional_box = W.VBox([pl_mode_big, pl_container_big])
+    functional_box = W.VBox([
+        W.HTML("<b>Input:</b>"),
+        row_big
+    ])
+
     mode2_box = W.VBox([
         init_idx, init_chain,
-        pl_mode_short, pl_container_short,
-        np_mode_2,   np_container_2
+        W.HTML("<b>Input:</b>"),
+        row_short,
+        row_np2
     ])
+
     mode3_box = W.VBox([
         init_idx, init_chain,
         final_idx, final_chain,
-        np_mode_3,  np_container_3
+        W.HTML("<b>Input:</b>"),
+        row_np3
     ])
 
     def _sync_mode(*_):
@@ -240,7 +256,6 @@ def launch(
             try:
                 pdb_upload.value = {}
             except Exception:
-                # full replace
                 new_upl = W.FileUpload(accept=".pdb", multiple=False, description="Choose file")
                 new_upl.observe(_on_upload_change, names="value")
                 kids = list(pdb_row.children)
@@ -345,12 +360,17 @@ def launch(
                         f.write(str(r).strip() + "\n")
                 print(f"Input file saved: {input_path}")
 
-                # ---- Run readpdb_strict immediately (using the input file) ----
+                # ---- Run readpdb_strict immediately (if available) ----
                 run_readpdb = _try_import_readpdb()
                 if run_readpdb is None:
                     print("ℹ️ readpdb_strict not found; skipping .cor generation.")
                 else:
-                    cor_path = run_readpdb(input_path=input_path)
+                    # Your latest readpdb_strict accepts input_path via keyword
+                    try:
+                        cor_path = run_readpdb(input_path=input_path)
+                    except TypeError:
+                        # fallback to older signature (pdb_path, chain, ...)
+                        cor_path = run_readpdb(pdb_path=save_path, chain=chain_global)
                     print(f"✔ COR written: {cor_path}")
                     # quick preview
                     try:
@@ -360,7 +380,7 @@ def launch(
                     except Exception:
                         pass
 
-                # ---- Optional POST (unchanged) ----
+                # ---- Optional POST ----
                 data = {"prediction_mode": mode, FN["chain_id"]: chain_global}
                 if pdb_code.value.strip():
                     data[FN["pdb_code"]] = pdb_code.value.strip().upper()
