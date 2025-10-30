@@ -1,10 +1,8 @@
 # mcpath/ui.py
-# UI-only form for MCPath with a single ipywidgets FileUpload (no Colab uploader).
-# Run once in Colab before calling launch():
-#   !pip -q install "ipywidgets==8.*" pyyaml requests
-#   from google.colab import output; output.enable_custom_widget_manager()
+# Single-uploader UI (no google.colab.files.upload). Works in Colab/Jupyter.
+# Requires: ipywidgets 8.x; in Colab call output.enable_custom_widget_manager().
 
-import os, re, requests, yaml
+import os, re, requests, yaml, time
 from IPython.display import display, clear_output
 import ipywidgets as W
 
@@ -62,11 +60,11 @@ def launch(
     target_url = cfg.get("target_url", "").strip()
     FN = cfg["field_names"]
 
-    # Branding
+    # --- Branding ---
     logo = _logo_widget(cfg.get("branding", {}))
 
-    # --- PDB: code OR single-file upload (ipywidgets only, no Colab uploader) ---
-    pdb_code = W.Text(value=str(cfg.get("pdb_code", "")), description="PDB code:", layout=W.Layout(width="350px"))
+    # --- PDB: code OR single file uploader ---
+    pdb_code = W.Text(value=str(cfg.get("pdb_code", "")), description="PDB code:", layout=W.Layout(width="380px"))
     or_lbl   = W.HTML("<b>&nbsp;&nbsp;or&nbsp;&nbsp;</b>")
 
     uploader = W.FileUpload(
@@ -74,32 +72,46 @@ def launch(
         multiple=False,
         description="Choose file (1)",
         icon="upload",
-        layout=W.Layout(width="240px", height="38px"),
+        layout=W.Layout(width="260px", height="38px"),
         disabled=False,
     )
     file_lbl = W.HTML("No file chosen")
+    # internal state
     picked = {"name": None, "bytes": None, "saved_path": None}
+    # a tiny hidden refresh button as a safety net (no need to click it)
+    _refresh = W.Button(description="", layout=W.Layout(width="1px", height="1px", visibility="hidden"))
 
-    def _on_upload_change(change):
+    def _save_current_selection():
+        """Save currently selected upload to disk (if any) and update label/state."""
         if not uploader.value:
-            file_lbl.value = "No file chosen"
-            picked.update(name=None, bytes=None, saved_path=None)
-            return
-        (fname, meta) = next(iter(uploader.value.items()))
-        # force .pdb extension if missing
+            return False
+        # In ipywidgets 8, .value is a dict: {filename: {content: bytes, ...}}
+        fname, meta = next(iter(uploader.value.items()))
         name = fname if fname.lower().endswith(".pdb") else (os.path.splitext(fname)[0] + ".pdb")
-        data = meta["content"]
+        data = meta.get("content", b"")
+        if not isinstance(data, (bytes, bytearray)) or len(data) == 0:
+            return False
         with open(name, "wb") as f:
             f.write(data)
-        picked.update(name=name, bytes=data, saved_path=os.path.join(os.getcwd(), name))
+        picked.update(name=name, bytes=bytes(data), saved_path=os.path.join(os.getcwd(), name))
         file_lbl.value = f"{name} (uploaded)"
-        # IMPORTANT: do NOT assign to uploader.value (read-only); leave it as-is
+        return True
 
+    # Primary observer (normal path)
+    def _on_upload_change(change):
+        _save_current_selection()
     uploader.observe(_on_upload_change, names="value")
 
+    # Fallback: some Colab builds miss the first trait event; poke once after render
+    def _on_refresh(_):
+        # Try to catch missed state once the front-end finishes rendering
+        if not picked["name"]:
+            _save_current_selection()
+    _refresh.on_click(_on_refresh)
+
     # --- Always-present fields ---
-    chain_id = W.Text(value=str(cfg.get("chain_id", "A")), description="Chain ID:", layout=W.Layout(width="350px"))
-    email    = W.Text(value=str(cfg.get("email", "")), description="Email (opt):", layout=W.Layout(width="350px"))
+    chain_id = W.Text(value=str(cfg.get("chain_id", "A")), description="Chain ID:", layout=W.Layout(width="380px"))
+    email    = W.Text(value=str(cfg.get("email", "")), description="Email (opt):", layout=W.Layout(width="380px"))
 
     # --- Prediction type ---
     pred_type = W.RadioButtons(
@@ -124,7 +136,7 @@ def launch(
         minv=1, maxv=10_000_000, step=1000
     )
 
-    # --- Mode 2: initial residue + short path length + number of paths ---
+    # --- Mode 2 ---
     init_idx   = W.BoundedIntText(value=1, min=1, max=1_000_000, step=1, description="Index of initial residue")
     init_chain = W.Text(value="", description="Chain of initial residue", placeholder="A", layout=W.Layout(width="260px"))
     short_len_opts = [5, 8, 10, 13, 15, 20, 25, 30]
@@ -138,7 +150,7 @@ def launch(
         minv=1, maxv=10_000_000, step=100
     )
 
-    # --- Mode 3: initial & final residues + number of paths ---
+    # --- Mode 3 ---
     final_idx   = W.BoundedIntText(value=1, min=1, max=1_000_000, step=1, description="Index of final residue")
     final_chain = W.Text(value="", description="Chain of final residue", placeholder="B", layout=W.Layout(width="260px"))
     num_paths_opts_mode3 = [1000, 2000, 3000, 5000, 10000, 30000, 50000]
@@ -156,7 +168,7 @@ def launch(
     status_bar = W.HTML("")
 
     # --- Grouped layouts ---
-    pdb_row = W.HBox([pdb_code, W.HTML("&nbsp;"), or_lbl, uploader, W.HTML("&nbsp;"), file_lbl])
+    pdb_row = W.HBox([pdb_code, W.HTML("&nbsp;"), or_lbl, uploader, W.HTML("&nbsp;"), file_lbl, _refresh])
 
     functional_box = W.VBox([pl_mode_big, pl_dd_big, pl_txt_big])
     mode2_box = W.VBox([init_idx, init_chain, pl_mode_short, pl_dd_short, pl_txt_short, np_mode_2, np_dd_2, np_txt_2])
@@ -211,7 +223,11 @@ def launch(
         status_bar.value = ""
 
     def _collect_pdb_bytes_and_name():
-        # Priority: uploaded file if present, otherwise RCSB using code
+        # Prefer uploaded file if present; else fetch by code
+        if picked["bytes"] and picked["name"]:
+            return picked["bytes"], picked["name"]
+        # Try once more in case Colab missed the trait the first time
+        _save_current_selection()
         if picked["bytes"] and picked["name"]:
             return picked["bytes"], picked["name"]
         code = pdb_code.value.strip()
@@ -231,32 +247,28 @@ def launch(
 
                 pdb_bytes, pdb_name = _collect_pdb_bytes_and_name()
 
-                # Save a local copy
+                # Save a local copy for user visibility
                 with open(pdb_name, "wb") as f:
                     f.write(pdb_bytes)
                 print(f"Saved local copy: {os.getcwd()}/{pdb_name}")
 
-                # OPTIONAL: call mcpath.readpdb_strict.run(...) if available
+                # OPTIONAL: local readpdb_strict
                 ran_local = False
                 try:
                     import importlib
                     rmod = importlib.import_module("mcpath.readpdb_strict")
-                    runner = None
                     for cand in ("run", "run_readpdb", "readpdb"):
-                        if hasattr(rmod, cand):
-                            runner = getattr(rmod, cand); break
-                    if callable(runner):
-                        print("▶ Running readpdb_strict …")
-                        res = runner(pdb_name, chain_global)  # expected signature
-                        if res is not None:
-                            print("readpdb_strict result keys:", list(res.keys()))
-                        ran_local = True
-                    else:
+                        if hasattr(rmod, cand) and callable(getattr(rmod, cand)):
+                            print("▶ Running readpdb_strict …")
+                            getattr(rmod, cand)(pdb_name, chain_global)
+                            ran_local = True
+                            break
+                    if not ran_local:
                         print("ℹ️ readpdb_strict has no callable (run/run_readpdb/readpdb); skipping.")
                 except Exception as e:
                     print("ℹ️ readpdb_strict not executed:", e)
 
-                # Build payload (if remote)
+                # Build preview / POST
                 data = {"prediction_mode": pred_type.value, FN["chain_id"]: chain_global}
                 if pdb_code.value.strip(): data[FN["pdb_code"]] = pdb_code.value.strip().upper()
                 if email.value.strip():    data[FN["email"]] = email.value.strip()
