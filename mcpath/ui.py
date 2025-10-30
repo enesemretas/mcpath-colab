@@ -20,12 +20,10 @@ def _list_or_custom(label: str, options, default_value, minv, maxv, step=1, desc
     if default_value not in options:
         options = sorted(options + [default_value])
     common_layout = W.Layout(width="420px", min_width="360px")
-    mode = W.ToggleButtons(
-        options=[("List", "list"), ("Custom", "custom")],
-        value="list",
-        description="", layout=W.Layout(width="180px", margin="0 16px 0 0"),
-        style=desc_style
-    )
+    mode = W.ToggleButtons(options=[("List", "list"), ("Custom", "custom")],
+                           value="list", description="",
+                           layout=W.Layout(width="180px", margin="0 16px 0 0"),
+                           style=desc_style)
     dd = W.Dropdown(options=options, value=default_value,
                     description=(label if label.endswith(":") else f"{label}:"),
                     layout=common_layout, style=desc_style)
@@ -74,7 +72,7 @@ def launch(
     pdb_upload = W.FileUpload(accept=".pdb", multiple=False, description="Choose file")
     file_lbl   = W.Label("No file chosen")
 
-    def _on_upload_change(change):
+    def _on_upload_change(_):
         file_lbl.value = next(iter(pdb_upload.value.keys())) if pdb_upload.value else "No file chosen"
     pdb_upload.observe(_on_upload_change, names="value")
 
@@ -119,7 +117,7 @@ def launch(
         "Number of Paths", num_paths_opts_mode3, 1000, 1, 10_000_000, 100, DESC
     )
 
-    # ---------- Buttons ----------
+    # ---------- Buttons & output ----------
     btn_submit = W.Button(description="Submit", button_style="success", icon="paper-plane")
     btn_clear  = W.Button(description="Clear",  button_style="warning", icon="trash")
     out = W.Output()
@@ -149,7 +147,7 @@ def launch(
     ]
     display(W.VBox(children))
 
-    # -------------------- handlers --------------------
+    # -------------------- helpers --------------------
     def _collect_pdb_bytes():
         if pdb_upload.value:
             (fname, meta) = next(iter(pdb_upload.value.items()))
@@ -170,6 +168,7 @@ def launch(
             except Exception:
                 return None
 
+    # -------------------- submit handler --------------------
     def on_submit(_):
         with out:
             clear_output()
@@ -177,6 +176,8 @@ def launch(
                 chain_global = chain_id.value.strip()
                 if not _is_valid_chain(chain_global):
                     raise ValueError("Chain ID must be a single character (e.g., A).")
+                if not _is_valid_email(email.value.strip()):
+                    raise ValueError("Invalid email format.")
 
                 pdb_bytes, pdb_name = _collect_pdb_bytes()
                 save_path = os.path.join(SAVE_DIR, pdb_name)
@@ -190,11 +191,11 @@ def launch(
                     rows = ["1", pdb_name, chain_global, str(get_big_len()), (email.value.strip() or "-")]
                 elif mode == "paths_init_len":
                     rows = ["2", pdb_name, chain_global, str(get_short_len()), str(get_num_paths_2()),
-                            str(int(init_idx.value)), (init_chain.value or "").strip(), (email.value.strip() or "-")]
+                            str(int(init_idx.value)), (init_chain.value or '').strip(), (email.value.strip() or "-")]
                 else:
                     rows = ["3", pdb_name, chain_global, str(int(init_idx.value)),
-                            (init_chain.value or "").strip(), str(int(final_idx.value)),
-                            (final_chain.value or "").strip(), (email.value.strip() or "-")]
+                            (init_chain.value or '').strip(), str(int(final_idx.value)),
+                            (final_chain.value or '').strip(), (email.value.strip() or "-")]
                 with open(input_path, "w") as f: f.write("\n".join(rows))
                 print(f"Input file saved: {input_path}")
 
@@ -207,48 +208,81 @@ def launch(
                     except TypeError:
                         cor_path = run_readpdb(pdb_path=save_path, chain=chain_global)
                     print(f"✔ COR written: {cor_path}")
-                    if os.path.isfile(cor_path):
+                    print(f"   COR exists? {os.path.isfile(cor_path)}")
+
+                    # quick preview
+                    try:
                         with open(cor_path, "r") as f:
                             head = "".join([next(f) for _ in range(5)])
-                        print("\nFirst lines of COR:\n", head)
+                        print("\nFirst lines of COR:\n" + head)
+                    except Exception as pe:
+                        print("   (Could not preview COR):", pe)
                 else:
                     print("ℹ️ readpdb_strict not found; skipping .cor generation.")
 
+                # ---- Normalize COR name for atomistic (expects <base>.cor) ----
+                desired_cor = None
+                if cor_path and os.path.isfile(cor_path):
+                    desired_cor = os.path.splitext(save_path)[0] + ".cor"   # /content/XXXX.cor
+                    if cor_path != desired_cor:
+                        import shutil
+                        try:
+                            shutil.copyfile(cor_path, desired_cor)
+                            print(f"↪ Copied COR to: {desired_cor} (for atomistic)")
+                        except Exception as ce:
+                            print("   (Could not copy COR):", ce)
+                            desired_cor = cor_path  # fallback to original
+
                 # ---- Run atomistic ----
                 try:
-                    if not cor_path or not os.path.isfile(cor_path):
+                    if not desired_cor or not os.path.isfile(desired_cor):
                         print("ℹ️ No .cor available; skipping atomistic LJ step.")
                     else:
-                        pkg_dir = os.path.dirname(os.path.abspath(__file__))
+                        # ensure mcpath is importable
+                        pkg_dir  = os.path.dirname(os.path.abspath(__file__))
                         root_dir = os.path.dirname(pkg_dir)
-                        if root_dir not in sys.path: sys.path.append(root_dir)
+                        if root_dir not in sys.path:
+                            sys.path.append(root_dir)
+                            print("   Added to sys.path:", root_dir)
                         importlib.invalidate_caches()
-                        atom_mod = importlib.import_module("mcpath.atomistic")
-                        importlib.reload(atom_mod)
 
+                        try:
+                            atom_mod = importlib.import_module("mcpath.atomistic")
+                        except ModuleNotFoundError as me:
+                            print("❌ Could not import mcpath.atomistic:", me)
+                            print("   Files in pkg_dir:", os.listdir(pkg_dir))
+                            raise
+                        atom_mod = importlib.reload(atom_mod)
+
+                        # Absolute paths for param/top inside mcpath
                         param_path = os.path.join(pkg_dir, "vdw_cns.param")
                         top_path   = os.path.join(pkg_dir, "pdb_cns.top")
+                        print("   param_path:", param_path, "exists?", os.path.isfile(param_path))
+                        print("   top_path:  ", top_path,   "exists?", os.path.isfile(top_path))
                         if not os.path.isfile(param_path): raise FileNotFoundError(param_path)
                         if not os.path.isfile(top_path):   raise FileNotFoundError(top_path)
 
-                        protein_base = os.path.splitext(save_path)[0]
-                        print("▶ Running atomistic LJ...")
+                        # Run (pass base WITHOUT extension)
+                        protein_base = os.path.splitext(save_path)[0]  # /content/XXXX
+                        print("▶ Running atomistic LJ on base:", protein_base)
                         norm = atom_mod.atomistic(protein_base, param_file=param_path,
                                                   top_file=top_path, rcut=5.0, kT=1.0, save_txt=True)
                         out_path = f"{protein_base}_atomistic.out"
-                        print(f"✔ Saved probability matrix: {out_path}")
+                        print(f"✔ Saved probability matrix: {out_path} (exists? {os.path.isfile(out_path)})")
                         if os.path.isfile(out_path):
                             import numpy as np
                             preview = np.loadtxt(out_path, max_rows=5)
-                            print("Preview (first 5 rows):\n", preview)
+                            print("Preview (first 5 rows):")
+                            print(preview)
                 except Exception as e:
                     print("❌ atomistic run failed:", e)
 
                 # ---- Optional POST ----
                 data = {"prediction_mode": mode, FN["chain_id"]: chain_global}
                 if pdb_code.value.strip(): data[FN["pdb_code"]] = pdb_code.value.strip().upper()
-                if email.value.strip(): data[FN["email"]] = email.value.strip()
-                if mode == "functional": data[FN["path_length"]] = str(get_big_len())
+                if email.value.strip():    data[FN["email"]] = email.value.strip()
+                if mode == "functional":
+                    data[FN["path_length"]] = str(get_big_len())
                 elif mode == "paths_init_len":
                     data.update({"length_paths": int(get_short_len()), "number_paths": int(get_num_paths_2())})
                 else:
