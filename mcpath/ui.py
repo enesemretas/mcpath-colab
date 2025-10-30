@@ -1,43 +1,65 @@
 # mcpath/ui.py
-# Single-uploader UI (no google.colab.files.upload). Works in Colab/Jupyter.
-# Requires: ipywidgets 8.x; in Colab call output.enable_custom_widget_manager().
-
-import os, re, requests, yaml, time
+import os, re, requests, yaml
 from IPython.display import display, clear_output
 import ipywidgets as W
 
 # -------------------- validators & helpers --------------------
-def _is_valid_pdb_code(c): return bool(re.fullmatch(r"[0-9A-Za-z]{4}", (c or "").strip()))
-def _is_valid_chain(ch):   return bool(re.fullmatch(r"[A-Za-z0-9]", (ch or "").strip()))
-def _is_valid_email(s):    return (not (s or "").strip()) or bool(re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", s.strip()))
+def _is_valid_pdb_code(c): return bool(re.fullmatch(r"[0-9A-Za-z]{4}", c.strip()))
+def _is_valid_chain(ch):   return bool(re.fullmatch(r"[A-Za-z0-9]", ch.strip()))
+def _is_valid_email(s):    return (not s.strip()) or bool(re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", s.strip()))
 
 def _fetch_rcsb(code: str) -> bytes:
     url = f"https://files.rcsb.org/download/{code.upper()}.pdb"
     r = requests.get(url, timeout=60); r.raise_for_status()
     return r.content
 
-def _list_or_custom(label: str, options, default_value, minv, maxv, step=1):
+def _list_or_custom(label: str, options, default_value, minv, maxv, step=1, desc_style=None):
+    """
+    One-at-a-time input: a small container whose single child is either a Dropdown (List)
+    or a BoundedIntText (Custom). Returns:
+      (mode_toggle, container_box, dropdown_widget, int_text_widget, get_value_fn)
+    """
     options = sorted({int(x) for x in options})
     default_value = int(default_value)
     if default_value not in options:
         options = sorted(options + [default_value])
 
-    mode = W.ToggleButtons(options=[("List","list"), ("Custom","custom")], value="list", description="Input:")
-    dd   = W.Dropdown(options=options, value=default_value, description=label)
-    txt  = W.BoundedIntText(value=default_value, min=minv, max=maxv, step=step, description=label)
+    common_layout = W.Layout(width="420px", min_width="360px")
 
-    def _sync(*_):
-        dd.layout.display  = ""   if mode.value == "list"   else "none"
-        txt.layout.display = ""   if mode.value == "custom" else "none"
-    _sync()
-    mode.observe(_sync, names="value")
+    mode = W.ToggleButtons(
+        options=[("List", "list"), ("Custom", "custom")],
+        value="list",
+        description="Input:",
+        layout=W.Layout(width="240px"),
+        style=desc_style
+    )
+    dd = W.Dropdown(
+        options=options, value=default_value,
+        description=(label if label.endswith(":") else f"{label}:"),
+        layout=common_layout,
+        style=desc_style
+    )
+    txt = W.BoundedIntText(
+        value=default_value, min=minv, max=maxv, step=step,
+        description=(label if label.endswith(":") else f"{label}:"),
+        layout=common_layout,
+        style=desc_style
+    )
+
+    # container holds the active input only
+    container = W.VBox([dd])
+
+    def _on_mode(change):
+        container.children = [dd] if change["new"] == "list" else [txt]
+    mode.observe(_on_mode, names="value")
 
     def get_value():
         return int(dd.value if mode.value == "list" else txt.value)
 
-    return mode, dd, txt, get_value
+    return mode, container, dd, txt, get_value
 
 def _logo_widget(branding: dict):
+    """Create a centered/left/right logo if branding['logo_url'] is set."""
     url = (branding.get("logo_url") or "").strip()
     if not url:
         return None
@@ -47,73 +69,59 @@ def _logo_widget(branding: dict):
         img_bytes = requests.get(url, timeout=20).content
         img = W.Image(value=img_bytes, format="png", layout=W.Layout(height=f"{height}px"))
         jc = {"center":"center", "left":"flex-start", "right":"flex-end"}.get(align, "center")
-        return W.HBox([img], layout=W.Layout(justify_content=jc))
+        box = W.HBox([img], layout=W.Layout(justify_content=jc))
+        return box
     except Exception:
         return None
 
 # -------------------- main UI --------------------
 def launch(
     defaults_url="https://raw.githubusercontent.com/enesemretas/mcpath-colab/main/config/defaults.yaml",
-    show_title="MCPath (Python readpdb)"
+    show_title="MCPath-style Parameters"
 ):
+    """Launches the MCPath parameter form (UI only)."""
     cfg = yaml.safe_load(requests.get(defaults_url, timeout=30).text)
     target_url = cfg.get("target_url", "").strip()
     FN = cfg["field_names"]
 
-    # --- Branding ---
+    # Where to save files (PDB + mcpath_input.txt)
+    SAVE_DIR = cfg.get("save_dir", "/content")
+    os.makedirs(SAVE_DIR, exist_ok=True)
+
+    # ---------- Branding / logo ----------
     logo = _logo_widget(cfg.get("branding", {}))
 
-    # --- PDB: code OR single file uploader ---
-    pdb_code = W.Text(value=str(cfg.get("pdb_code", "")), description="PDB code:", layout=W.Layout(width="380px"))
-    or_lbl   = W.HTML("<b>&nbsp;&nbsp;or&nbsp;&nbsp;</b>")
+    # wider description column so labels aren't truncated
+    DESC = {'description_width': '240px'}
 
-    uploader = W.FileUpload(
-        accept=".pdb",
-        multiple=False,
-        description="Choose file (1)",
-        icon="upload",
-        layout=W.Layout(width="260px", height="38px"),
-        disabled=False,
-    )
-    file_lbl = W.HTML("No file chosen")
-    # internal state
-    picked = {"name": None, "bytes": None, "saved_path": None}
-    # a tiny hidden refresh button as a safety net (no need to click it)
-    _refresh = W.Button(description="", layout=W.Layout(width="1px", height="1px", visibility="hidden"))
+    # wide layout so inputs are readable
+    wide = W.Layout(width="420px", min_width="360px")
 
-    def _save_current_selection():
-        """Save currently selected upload to disk (if any) and update label/state."""
-        if not uploader.value:
-            return False
-        # In ipywidgets 8, .value is a dict: {filename: {content: bytes, ...}}
-        fname, meta = next(iter(uploader.value.items()))
-        name = fname if fname.lower().endswith(".pdb") else (os.path.splitext(fname)[0] + ".pdb")
-        data = meta.get("content", b"")
-        if not isinstance(data, (bytes, bytearray)) or len(data) == 0:
-            return False
-        with open(name, "wb") as f:
-            f.write(data)
-        picked.update(name=name, bytes=bytes(data), saved_path=os.path.join(os.getcwd(), name))
-        file_lbl.value = f"{name} (uploaded)"
-        return True
+    # ---------- PDB: code OR upload ----------
+    pdb_code   = W.Text(value=str(cfg.get("pdb_code", "")),
+                        description="PDB code:",
+                        layout=wide, style=DESC)
+    or_lbl     = W.HTML("<b>&nbsp;&nbsp;or&nbsp;&nbsp;</b>")
+    pdb_upload = W.FileUpload(accept=".pdb", multiple=False, description="Choose File")
+    file_lbl   = W.Label("No file chosen")
 
-    # Primary observer (normal path)
     def _on_upload_change(change):
-        _save_current_selection()
-    uploader.observe(_on_upload_change, names="value")
+        if pdb_upload.value:
+            fname = next(iter(pdb_upload.value.keys()))
+            file_lbl.value = fname
+        else:
+            file_lbl.value = "No file chosen"
+    pdb_upload.observe(_on_upload_change, names="value")
 
-    # Fallback: some Colab builds miss the first trait event; poke once after render
-    def _on_refresh(_):
-        # Try to catch missed state once the front-end finishes rendering
-        if not picked["name"]:
-            _save_current_selection()
-    _refresh.on_click(_on_refresh)
+    # ---------- Always-present fields ----------
+    chain_id   = W.Text(value=str(cfg.get("chain_id", "")),
+                        description="Chain ID:",
+                        layout=wide, style=DESC)
+    email      = W.Text(value=str(cfg.get("email", "")),
+                        description="Email (opt):",
+                        layout=wide, style=DESC)
 
-    # --- Always-present fields ---
-    chain_id = W.Text(value=str(cfg.get("chain_id", "A")), description="Chain ID:", layout=W.Layout(width="380px"))
-    email    = W.Text(value=str(cfg.get("email", "")), description="Email (opt):", layout=W.Layout(width="380px"))
-
-    # --- Prediction type ---
+    # ---------- Prediction type ----------
     pred_type = W.RadioButtons(
         options=[
             ("Functional Residues", "functional"),
@@ -122,57 +130,74 @@ def launch(
         ],
         value="functional",
         description="Prediction:",
-        layout=W.Layout(width="auto")
+        layout=W.Layout(width="auto"),
+        style=DESC
     )
 
-    # --- Functional (long path length) ---
+    # ---------- Functional mode: big path_length (YAML-driven List/Custom) ----------
     big_opts = cfg.get("path_length_options", [
         100000, 200000, 300000, 400000, 500000, 750000,
         1000000, 2000000, 3000000, 4000000
     ])
     big_default = int(cfg.get("path_length", big_opts[0] if big_opts else 100000))
-    (pl_mode_big, pl_dd_big, pl_txt_big, get_big_len) = _list_or_custom(
-        label="Path length:", options=big_opts, default_value=big_default,
-        minv=1, maxv=10_000_000, step=1000
+    (pl_mode_big, pl_container_big, pl_dd_big, pl_txt_big, get_big_len) = _list_or_custom(
+        label="Path length", options=big_opts, default_value=big_default,
+        minv=1, maxv=10_000_000, step=1000, desc_style=DESC
     )
 
-    # --- Mode 2 ---
-    init_idx   = W.BoundedIntText(value=1, min=1, max=1_000_000, step=1, description="Index of initial residue")
-    init_chain = W.Text(value="", description="Chain of initial residue", placeholder="A", layout=W.Layout(width="260px"))
+    # ---------- Mode 2: initial residue + short path length + number of paths ----------
+    init_idx   = W.BoundedIntText(value=1, min=1, max=1_000_000, step=1,
+                                  description="Index of initial residue:",
+                                  layout=wide, style=DESC)
+    init_chain = W.Text(value="", description="Chain of initial residue:",
+                        placeholder="A", layout=wide, style=DESC)
+
     short_len_opts = [5, 8, 10, 13, 15, 20, 25, 30]
-    (pl_mode_short, pl_dd_short, pl_txt_short, get_short_len) = _list_or_custom(
-        label="Length of Paths:", options=short_len_opts, default_value=5,
-        minv=1, maxv=10_000, step=1
+    (pl_mode_short, pl_container_short, pl_dd_short, pl_txt_short, get_short_len) = _list_or_custom(
+        label="Length of Paths", options=short_len_opts, default_value=5,
+        minv=1, maxv=10_000, step=1, desc_style=DESC
     )
+
     num_paths_opts_mode2 = [1000, 2000, 3000, 5000, 10000, 20000, 30000, 40000, 50000]
-    (np_mode_2, np_dd_2, np_txt_2, get_num_paths_2) = _list_or_custom(
-        label="Number of Paths:", options=num_paths_opts_mode2, default_value=1000,
-        minv=1, maxv=10_000_000, step=100
+    (np_mode_2, np_container_2, np_dd_2, np_txt_2, get_num_paths_2) = _list_or_custom(
+        label="Number of Paths", options=num_paths_opts_mode2, default_value=1000,
+        minv=1, maxv=10_000_000, step=100, desc_style=DESC
     )
 
-    # --- Mode 3 ---
-    final_idx   = W.BoundedIntText(value=1, min=1, max=1_000_000, step=1, description="Index of final residue")
-    final_chain = W.Text(value="", description="Chain of final residue", placeholder="B", layout=W.Layout(width="260px"))
+    # ---------- Mode 3: initial & final residues + number of paths ----------
+    final_idx   = W.BoundedIntText(value=1, min=1, max=1_000_000, step=1,
+                                   description="Index of final residue:",
+                                   layout=wide, style=DESC)
+    final_chain = W.Text(value="", description="Chain of final residue:",
+                         placeholder="B", layout=wide, style=DESC)
+
     num_paths_opts_mode3 = [1000, 2000, 3000, 5000, 10000, 30000, 50000]
-    (np_mode_3, np_dd_3, np_txt_3, get_num_paths_3) = _list_or_custom(
-        label="Number of Paths:", options=num_paths_opts_mode3, default_value=1000,
-        minv=1, maxv=10_000_000, step=100
+    (np_mode_3, np_container_3, np_dd_3, np_txt_3, get_num_paths_3) = _list_or_custom(
+        label="Number of Paths", options=num_paths_opts_mode3, default_value=1000,
+        minv=1, maxv=10_000_000, step=100, desc_style=DESC
     )
 
-    # --- Actions & output ---
-    btn_submit = W.Button(description="Submit", button_style="success", icon="paper-plane",
-                          layout=W.Layout(width="220px", height="40px"))
-    btn_clear  = W.Button(description="Clear",  button_style="warning", icon="trash",
-                          layout=W.Layout(width="220px", height="40px"))
+    # ---------- Actions & output ----------
+    btn_submit = W.Button(description="Submit", button_style="success", icon="paper-plane")
+    btn_clear  = W.Button(description="Clear",  button_style="warning", icon="trash")
     out        = W.Output()
-    status_bar = W.HTML("")
 
-    # --- Grouped layouts ---
-    pdb_row = W.HBox([pdb_code, W.HTML("&nbsp;"), or_lbl, uploader, W.HTML("&nbsp;"), file_lbl, _refresh])
+    # ---------- Grouped layouts per section ----------
+    pdb_row = W.HBox([pdb_code, W.HTML("&nbsp;"), or_lbl, pdb_upload, file_lbl],
+                     layout=W.Layout(align_items="center", justify_content="flex-start",
+                                     flex_flow="row wrap", gap="10px"))
 
-    functional_box = W.VBox([pl_mode_big, pl_dd_big, pl_txt_big])
-    mode2_box = W.VBox([init_idx, init_chain, pl_mode_short, pl_dd_short, pl_txt_short, np_mode_2, np_dd_2, np_txt_2])
-    mode3_box = W.VBox([init_idx, init_chain, final_idx, final_chain, np_mode_3, np_dd_3, np_txt_3])
+    functional_box = W.VBox([pl_mode_big, pl_container_big])
+    mode2_box = W.VBox([
+        init_idx, init_chain,
+        pl_mode_short, pl_container_short,
+        np_mode_2,   np_container_2
+    ])
+    mode3_box = W.VBox([
+        init_idx, init_chain,
+        final_idx, final_chain,
+        np_mode_3,  np_container_3
+    ])
 
     def _sync_mode(*_):
         functional_box.layout.display = ""
@@ -188,6 +213,7 @@ def launch(
     _sync_mode()
     pred_type.observe(_sync_mode, names="value")
 
+    # ---------- Render the full UI ----------
     children = []
     if logo: children.append(logo)
     children += [
@@ -199,37 +225,37 @@ def launch(
         mode2_box,
         mode3_box,
         chain_id, email,
-        W.HBox([btn_submit, W.HTML("&nbsp;"), btn_clear]),
-        status_bar,
+        W.HBox([btn_submit, btn_clear]),
         W.HTML("<hr>"), out
     ]
-    display(W.VBox(children))
+    display(W.VBox(children, layout=W.Layout(width="auto")))
 
     # -------------------- handlers --------------------
     def on_clear(_):
         pdb_code.value = ""
-        chain_id.value = str(cfg.get("chain_id", "A"))
+        pdb_upload.value.clear()
+        file_lbl.value = "No file chosen"
+        chain_id.value = ""
         email.value = ""
         pred_type.value = "functional"
-        pl_mode_big.value = "list"; pl_dd_big.value = pl_dd_big.options[0]; pl_txt_big.value = int(pl_dd_big.options[0])
+        # reset to List modes
+        pl_mode_big.value = "list"
+        pl_mode_short.value = "list"
+        np_mode_2.value = "list"
+        np_mode_3.value = "list"
+        # reset numeric/text values
+        pl_dd_big.value = pl_dd_big.options[0]; pl_txt_big.value = int(pl_dd_big.options[0])
         init_idx.value = 1; init_chain.value = ""
-        pl_mode_short.value = "list"; pl_dd_short.value = pl_dd_short.options[0]; pl_txt_short.value = int(pl_dd_short.options[0])
-        np_mode_2.value = "list"; np_dd_2.value = np_dd_2.options[0]; np_txt_2.value = int(np_dd_2.options[0])
+        pl_dd_short.value = pl_dd_short.options[0]; pl_txt_short.value = int(pl_dd_short.options[0])
+        np_dd_2.value = np_dd_2.options[0];       np_txt_2.value = int(np_dd_2.options[0])
         final_idx.value = 1; final_chain.value = ""
-        np_mode_3.value = "list"; np_dd_3.value = np_dd_3.options[0]; np_txt_3.value = int(np_dd_3.options[0])
-        picked.update(name=None, bytes=None, saved_path=None)
-        file_lbl.value = "No file chosen"
+        np_dd_3.value = np_dd_3.options[0];       np_txt_3.value = int(np_dd_3.options[0])
         with out: clear_output()
-        status_bar.value = ""
 
-    def _collect_pdb_bytes_and_name():
-        # Prefer uploaded file if present; else fetch by code
-        if picked["bytes"] and picked["name"]:
-            return picked["bytes"], picked["name"]
-        # Try once more in case Colab missed the trait the first time
-        _save_current_selection()
-        if picked["bytes"] and picked["name"]:
-            return picked["bytes"], picked["name"]
+    def _collect_pdb_bytes():
+        if pdb_upload.value:
+            (fname, meta) = next(iter(pdb_upload.value.items()))
+            return meta["content"], fname
         code = pdb_code.value.strip()
         if not _is_valid_pdb_code(code):
             raise ValueError("PDB code must be exactly 4 alphanumeric characters (or upload a file).")
@@ -239,56 +265,90 @@ def launch(
         with out:
             clear_output()
             try:
+                # basic validation
                 chain_global = chain_id.value.strip()
                 if not _is_valid_chain(chain_global):
                     raise ValueError("Chain ID must be a single character (e.g., A).")
                 if not _is_valid_email(email.value.strip()):
                     raise ValueError("Invalid email format.")
 
-                pdb_bytes, pdb_name = _collect_pdb_bytes_and_name()
+                # obtain PDB bytes & name
+                pdb_bytes, pdb_name = _collect_pdb_bytes()
 
-                # Save a local copy for user visibility
-                with open(pdb_name, "wb") as f:
+                # ---- Save PDB to SAVE_DIR ----
+                save_path = os.path.join(SAVE_DIR, pdb_name)
+                with open(save_path, "wb") as f:
                     f.write(pdb_bytes)
-                print(f"Saved local copy: {os.getcwd()}/{pdb_name}")
+                print(f"Saved local copy: {save_path}")
 
-                # OPTIONAL: local readpdb_strict
-                ran_local = False
-                try:
-                    import importlib
-                    rmod = importlib.import_module("mcpath.readpdb_strict")
-                    for cand in ("run", "run_readpdb", "readpdb"):
-                        if hasattr(rmod, cand) and callable(getattr(rmod, cand)):
-                            print("▶ Running readpdb_strict …")
-                            getattr(rmod, cand)(pdb_name, chain_global)
-                            ran_local = True
-                            break
-                    if not ran_local:
-                        print("ℹ️ readpdb_strict has no callable (run/run_readpdb/readpdb); skipping.")
-                except Exception as e:
-                    print("ℹ️ readpdb_strict not executed:", e)
+                # ---- Build input file rows based on mode ----
+                input_path = os.path.join(os.path.dirname(save_path), "mcpath_input.txt")
+                rows = []
+                mode = pred_type.value
 
-                # Build preview / POST
-                data = {"prediction_mode": pred_type.value, FN["chain_id"]: chain_global}
-                if pdb_code.value.strip(): data[FN["pdb_code"]] = pdb_code.value.strip().upper()
-                if email.value.strip():    data[FN["email"]] = email.value.strip()
-
-                if pred_type.value == "functional":
-                    data[FN["path_length"]] = str(get_big_len())
-                elif pred_type.value == "paths_init_len":
+                if mode == "functional":
+                    rows = [
+                        "1",
+                        pdb_name,
+                        chain_global,
+                        str(get_big_len()),
+                        email.value.strip() or "-"
+                    ]
+                elif mode == "paths_init_len":
                     if not _is_valid_chain(init_chain.value or ""):
                         raise ValueError("Chain of initial residue must be a single character.")
-                    data.update({
-                        "index_initial": int(init_idx.value),
-                        "chain_initial": (init_chain.value or "").strip(),
-                        "length_paths":  int(get_short_len()),
-                        "number_paths":  int(get_num_paths_2()),
-                    })
-                elif pred_type.value == "paths_init_final":
+                    rows = [
+                        "2",
+                        pdb_name,
+                        chain_global,
+                        str(get_short_len()),
+                        str(get_num_paths_2()),
+                        str(int(init_idx.value)),
+                        (init_chain.value or "").strip(),
+                        email.value.strip() or "-"
+                    ]
+                elif mode == "paths_init_final":
                     if not _is_valid_chain(init_chain.value or ""):
                         raise ValueError("Chain of initial residue must be a single character.")
                     if not _is_valid_chain(final_chain.value or ""):
                         raise ValueError("Chain of final residue must be a single character.")
+                    rows = [
+                        "3",
+                        pdb_name,
+                        chain_global,
+                        str(int(init_idx.value)),
+                        (init_chain.value or "").strip(),
+                        str(int(final_idx.value)),
+                        (final_chain.value or "").strip(),
+                        email.value.strip() or "-"
+                    ]
+
+                with open(input_path, "w") as f:
+                    for r in rows:
+                        f.write(str(r).strip() + "\n")
+                print(f"Input file saved: {input_path}")
+
+                # ---- Prepare payload for optional POST ----
+                data = {
+                    "prediction_mode": mode,
+                    FN["chain_id"]: chain_global,
+                }
+                if pdb_code.value.strip():
+                    data[FN["pdb_code"]] = pdb_code.value.strip().upper()
+                if email.value.strip():
+                    data[FN["email"]] = email.value.strip()
+
+                # mode-specific fields for POST (if target_url is set)
+                if mode == "functional":
+                    data[FN["path_length"]] = str(get_big_len())
+                elif mode == "paths_init_len":
+                    data.update({
+                        "length_paths":  int(get_short_len()),
+                        "number_paths":  int(get_num_paths_2()),
+                        "index_initial": int(init_idx.value),
+                        "chain_initial": (init_chain.value or "").strip(),
+                    })
+                elif mode == "paths_init_final":
                     data.update({
                         "index_initial": int(init_idx.value),
                         "chain_initial": (init_chain.value or "").strip(),
@@ -297,20 +357,21 @@ def launch(
                         "number_paths":  int(get_num_paths_3()),
                     })
 
+                files = {FN["pdb_file"]: (pdb_name, pdb_bytes, "chemical/x-pdb")}
+
                 if not target_url:
                     print("\n(No target_url set) — preview only payload below:\n")
                     preview = dict(data); preview["attached_file"] = pdb_name
                     print(preview)
-                    if not ran_local:
-                        print("\nTip: add mcpath/readpdb_strict.py with run(pdb_path, chain_id) to parse locally.")
                     return
 
-                files = {FN["pdb_file"]: (pdb_name, pdb_bytes, "chemical/x-pdb")}
                 print(f"Submitting to {target_url} …")
                 r = requests.post(target_url, data=data, files=files, timeout=180)
                 print("HTTP", r.status_code)
-                try: print("JSON:", r.json())
-                except Exception: print("Response (≤800 chars):\n", r.text[:800])
+                try:
+                    print("JSON:", r.json())
+                except Exception:
+                    print("Response (≤800 chars):\n", r.text[:800])
 
             except Exception as e:
                 print("❌", e)
