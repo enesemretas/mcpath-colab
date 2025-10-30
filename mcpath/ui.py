@@ -152,7 +152,11 @@ def launch(
 
     # Actions & shared output (singleton)
     btn_submit = W.Button(description="Submit", button_style="success", icon="paper-plane")
-    btn_clear  = W.Button(description="Clear",  button_style="warning", icon="trash")
+    
+    # --- CHANGED ---
+    # Renamed button and changed style/icon
+    btn_new_job = W.Button(description="New Job",  button_style="info", icon="plus")
+    
     if _LOG_OUT is None:
         _LOG_OUT = W.Output()
     out = _LOG_OUT  # reuse the same Output every time
@@ -187,7 +191,9 @@ def launch(
         mode2_box,
         mode3_box,
         chain_id, email,
-        W.HBox([btn_submit, btn_clear]),
+        # --- CHANGED ---
+        # Added new button to the HBox
+        W.HBox([btn_submit, btn_new_job]),
         W.HTML("<hr>"),
         out
     ]
@@ -197,40 +203,18 @@ def launch(
     display(root)
 
     # -------------------- handlers --------------------
-    def on_clear(_):
-        # Reset simple text fields to their defaults from config or hardcoded
-        pdb_code.value = str(cfg.get("pdb_code", ""))
-        chain_id.value = str(cfg.get("chain_id", ""))
-        email.value    = str(cfg.get("email", ""))
-
-        # Reset file upload
-        file_lbl.value = "No file chosen"
-        # Try to reset the FileUpload widget (this is the standard way)
-        for attempt in ((), {}, None): 
-            try:
-                pdb_upload.value = attempt; break
-            except Exception:
-                pass
-
-        # Reset prediction type (this will also trigger _sync_mode)
-        pred_type.value = "functional"  
-
-        # Reset mode-specific fields to their initial values
-        init_idx.value = 1
-        init_chain.value = ""
-        final_idx.value = 1
-        final_chain.value = ""
-
-        # Reset list/custom rows to their *original* default values
-        # These vars (big_default, etc.) are from the outer launch() scope
-        big_ctrl['set_list'](big_default)
-        short_ctrl['set_list'](5)    # Default was hardcoded as 5 in launch
-        np2_ctrl['set_list'](1000)   # Default was hardcoded as 1000 in launch
-        np3_ctrl['set_list'](1000)   # Default was hardcoded as 1000 in launch
-
-        # Clear the shared log output
+    
+    # --- NEW HANDLER ---
+    # This function re-calls launch(), creating a new form instance
+    def on_new_job(_):
+        # Clear the output log *before* creating the new form
         if _LOG_OUT:
             _LOG_OUT.clear_output(wait=True)
+        # Re-run the launch function to start fresh
+        launch(defaults_url=defaults_url, show_title=show_title)
+
+    # --- REMOVED ---
+    # The on_clear function is no longer needed.
 
     def _collect_pdb_bytes():
         if pdb_upload.value:
@@ -378,5 +362,7 @@ def launch(
             except Exception as e:
                 print("❌", e)
 
-    btn_clear.on_click(on_clear)
+    # --- CHANGED ---
+    # Pointing the new button to the new handler
+    btn_new_job.on_click(on_new_job)
     btn_submit.on_click(on_submit)
