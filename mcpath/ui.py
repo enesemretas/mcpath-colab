@@ -1,5 +1,5 @@
 # mcpath/ui.py
-import os, re, requests, yaml
+import os, re, requests, yaml, importlib
 from IPython.display import display, clear_output
 import ipywidgets as W
 
@@ -102,7 +102,7 @@ def launch(
                         description="PDB code:",
                         layout=wide, style=DESC)
     or_lbl     = W.HTML("<b>&nbsp;&nbsp;or&nbsp;&nbsp;</b>")
-    pdb_upload = W.FileUpload(accept=".pdb", multiple=False, description="Choose File")
+    pdb_upload = W.FileUpload(accept=".pdb", multiple=False, description="Choose file")
     file_lbl   = W.Label("No file chosen")
 
     def _on_upload_change(change):
@@ -231,9 +231,28 @@ def launch(
     display(W.VBox(children, layout=W.Layout(width="auto")))
 
     # -------------------- handlers --------------------
+    def _reset_upload_widget():
+        """Recreate FileUpload to avoid read-only .value TraitError."""
+        nonlocal pdb_upload, pdb_row
+        try:
+            pdb_upload.value = ()
+        except Exception:
+            try:
+                pdb_upload.value = {}
+            except Exception:
+                # full replace
+                new_upl = W.FileUpload(accept=".pdb", multiple=False, description="Choose file")
+                new_upl.observe(_on_upload_change, names="value")
+                kids = list(pdb_row.children)
+                kids[3] = new_upl
+                pdb_row.children = tuple(kids)
+                try: pdb_upload.close()
+                except Exception: pass
+                pdb_upload = new_upl
+
     def on_clear(_):
         pdb_code.value = ""
-        pdb_upload.value.clear()
+        _reset_upload_widget()
         file_lbl.value = "No file chosen"
         chain_id.value = ""
         email.value = ""
@@ -261,6 +280,18 @@ def launch(
             raise ValueError("PDB code must be exactly 4 alphanumeric characters (or upload a file).")
         return _fetch_rcsb(code), f"{code.upper()}.pdb"
 
+    def _try_import_readpdb():
+        # import from package or module path
+        try:
+            from .readpdb_strict import run as run_readpdb
+            return run_readpdb
+        except Exception:
+            try:
+                from mcpath.readpdb_strict import run as run_readpdb
+                return run_readpdb
+            except Exception:
+                return None
+
     def on_submit(_):
         with out:
             clear_output()
@@ -287,25 +318,15 @@ def launch(
                 mode = pred_type.value
 
                 if mode == "functional":
-                    rows = [
-                        "1",
-                        pdb_name,
-                        chain_global,
-                        str(get_big_len()),
-                        email.value.strip() or "-"
-                    ]
+                    rows = ["1", pdb_name, chain_global, str(get_big_len()), (email.value.strip() or "-")]
                 elif mode == "paths_init_len":
                     if not _is_valid_chain(init_chain.value or ""):
                         raise ValueError("Chain of initial residue must be a single character.")
                     rows = [
-                        "2",
-                        pdb_name,
-                        chain_global,
-                        str(get_short_len()),
-                        str(get_num_paths_2()),
-                        str(int(init_idx.value)),
-                        (init_chain.value or "").strip(),
-                        email.value.strip() or "-"
+                        "2", pdb_name, chain_global,
+                        str(get_short_len()), str(get_num_paths_2()),
+                        str(int(init_idx.value)), (init_chain.value or "").strip(),
+                        (email.value.strip() or "-")
                     ]
                 elif mode == "paths_init_final":
                     if not _is_valid_chain(init_chain.value or ""):
@@ -313,14 +334,10 @@ def launch(
                     if not _is_valid_chain(final_chain.value or ""):
                         raise ValueError("Chain of final residue must be a single character.")
                     rows = [
-                        "3",
-                        pdb_name,
-                        chain_global,
-                        str(int(init_idx.value)),
-                        (init_chain.value or "").strip(),
-                        str(int(final_idx.value)),
-                        (final_chain.value or "").strip(),
-                        email.value.strip() or "-"
+                        "3", pdb_name, chain_global,
+                        str(int(init_idx.value)), (init_chain.value or "").strip(),
+                        str(int(final_idx.value)), (final_chain.value or "").strip(),
+                        (email.value.strip() or "-")
                     ]
 
                 with open(input_path, "w") as f:
@@ -328,17 +345,28 @@ def launch(
                         f.write(str(r).strip() + "\n")
                 print(f"Input file saved: {input_path}")
 
-                # ---- Prepare payload for optional POST ----
-                data = {
-                    "prediction_mode": mode,
-                    FN["chain_id"]: chain_global,
-                }
+                # ---- Run readpdb_strict immediately (using the input file) ----
+                run_readpdb = _try_import_readpdb()
+                if run_readpdb is None:
+                    print("ℹ️ readpdb_strict not found; skipping .cor generation.")
+                else:
+                    cor_path = run_readpdb(input_path=input_path)
+                    print(f"✔ COR written: {cor_path}")
+                    # quick preview
+                    try:
+                        with open(cor_path, "r") as f:
+                            head = "".join([next(f) for _ in range(5)])
+                        print("\nFirst lines of COR:\n" + head)
+                    except Exception:
+                        pass
+
+                # ---- Optional POST (unchanged) ----
+                data = {"prediction_mode": mode, FN["chain_id"]: chain_global}
                 if pdb_code.value.strip():
                     data[FN["pdb_code"]] = pdb_code.value.strip().upper()
                 if email.value.strip():
                     data[FN["email"]] = email.value.strip()
 
-                # mode-specific fields for POST (if target_url is set)
                 if mode == "functional":
                     data[FN["path_length"]] = str(get_big_len())
                 elif mode == "paths_init_len":
