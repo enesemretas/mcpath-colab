@@ -362,6 +362,7 @@ def launch(
 
                 # ---- Run readpdb_strict immediately (if available) ----
                 run_readpdb = _try_import_readpdb()
+                cor_path = None
                 if run_readpdb is None:
                     print("ℹ️ readpdb_strict not found; skipping .cor generation.")
                 else:
@@ -373,36 +374,50 @@ def launch(
                         cor_path = run_readpdb(pdb_path=save_path, chain=chain_global)
                     print(f"✔ COR written: {cor_path}")
 
-                                    # quick preview
+                    # quick preview
                     try:
                         with open(cor_path, "r") as f:
                             head = "".join([next(f) for _ in range(5)])
                         print("\nFirst lines of COR:\n" + head)
                     except Exception:
                         pass
-                        
+
                 # ---- Run atomistic (creates <pdb>_atomistic.out) ----
-                    try:
-                        # import/reload so edits take effect without restarting
+                try:
+                    if not cor_path or not os.path.isfile(cor_path):
+                        print("ℹ️ No .cor available; skipping atomistic LJ step.")
+                    else:
+                        # make sure mcpath is importable (useful in Colab)
+                        import sys
+                        pkg_dir = os.path.dirname(os.path.abspath(__file__))
+                        root_dir = os.path.dirname(pkg_dir)
+                        if root_dir not in sys.path:
+                            sys.path.append(root_dir)
+
                         atom_mod = importlib.import_module("mcpath.atomistic")
                         importlib.reload(atom_mod)
 
-                        # Use absolute paths for param/top that live inside the mcpath folder
+                        # Absolute paths for param/top inside mcpath
                         here = os.path.dirname(os.path.abspath(__file__))
                         param_path = os.path.join(here, "vdw_cns.param")
                         top_path   = os.path.join(here, "pdb_cns.top")
+
+                        if not os.path.isfile(param_path):
+                            raise FileNotFoundError(f"vdw_cns.param not found at {param_path}")
+                        if not os.path.isfile(top_path):
+                            raise FileNotFoundError(f"pdb_cns.top not found at {top_path}")
 
                         # Pass the PDB *basename without extension* (same base as the .cor)
                         protein_base = os.path.splitext(save_path)[0]
 
                         print("▶ Running atomistic LJ…")
                         norm = atom_mod.atomistic(
-                            protein_base,                 # e.g. "/content/4CFR"
-                            param_file=param_path,        # mcpath/vdw_cns.param
-                            top_file=top_path,            # mcpath/pdb_cns.top
+                            protein_base,          # e.g. "/content/4CFR"
+                            param_file=param_path, # mcpath/vdw_cns.param
+                            top_file=top_path,     # mcpath/pdb_cns.top
                             rcut=5.0,
                             kT=1.0,
-                            save_txt=True                 # writes "<base>_atomistic.out"
+                            save_txt=True          # writes "<base>_atomistic.out"
                         )
                         out_path = f"{protein_base}_atomistic.out"
                         print(f"✔ Saved probability matrix: {out_path}")
@@ -415,11 +430,11 @@ def launch(
                             print(preview)
                         except Exception:
                             pass
+                except Exception as e:
+                    print("❌ atomistic run failed:", e)
 
-                    except Exception as e:
-                        print("❌ atomistic run failed:", e)
+                # ---- Optional POST ----
 
-                    
 
                 # ---- Optional POST ----
                 data = {"prediction_mode": mode, FN["chain_id"]: chain_global}
