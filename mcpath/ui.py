@@ -13,19 +13,16 @@ def _fetch_rcsb(code: str) -> bytes:
     r = requests.get(url, timeout=60); r.raise_for_status()
     return r.content
 
-# ---------- “List | Custom | Value” control ----------
+# ---------- “List | Custom | Value” single-row control ----------
 def list_custom_row(label: str, options, default_value, minv, maxv, step=1, desc_style=None):
     """
-    Row layout:
-      [ <label> ] [ List | Custom ] [ values widget (dropdown or BoundedIntText) ]
-
+    Row layout:  [ Label ]  [ ToggleButtons: List | Custom ]  [ ValueWidget ]
     Returns:
-      row_box, get_value_fn, (mode_toggle, container, dropdown, inttext)
+      row_box, get_value_fn, (mode_toggle, value_container, dropdown, inttext)
     """
     opts = [] if options is None else list(options)
     has_list = len(opts) > 0
     if has_list:
-        # normalize to unique ints, keep default in list
         try:
             opts = sorted({int(x) for x in opts})
         except Exception:
@@ -35,34 +32,34 @@ def list_custom_row(label: str, options, default_value, minv, maxv, step=1, desc
     except Exception:
         default_value = minv
 
-    # Widgets
-    lab = W.Label(f"{label}:", layout=W.Layout(width="180px", min_width="140px"))
-    mode = W.ToggleButtons(
+    # fixed widths so the buttons sit side-by-side
+    label_w   = W.Label(f"{label}:", layout=W.Layout(width="180px", min_width="160px"))
+    mode      = W.ToggleButtons(
         options=[("List", "list"), ("Custom", "custom")] if has_list else [("Custom", "custom")],
         value="list" if has_list else "custom",
-        layout=W.Layout(width="200px"),
+        layout=W.Layout(width="220px", min_width="200px"),  # wide enough for two buttons horizontally
         style=desc_style
     )
     dd = W.Dropdown(
         options=(opts + ([default_value] if (has_list and default_value not in opts) else [])) if has_list else [],
         value=(default_value if has_list else None),
-        layout=W.Layout(width="260px", min_width="220px"),
+        layout=W.Layout(width="280px", min_width="240px"),
         style=desc_style
     )
     txt = W.BoundedIntText(
         value=default_value, min=minv, max=maxv, step=step,
-        layout=W.Layout(width="260px", min_width="220px"),
+        layout=W.Layout(width="280px", min_width="240px"),
         style=desc_style
     )
 
-    container = W.Box([dd if has_list else txt])
-    container.layout = W.Layout(align_items="center")
+    value_container = W.Box([dd if has_list else txt],
+                            layout=W.Layout(align_items="center"))
 
     def _on_mode(change):
         if change["new"] == "list" and has_list:
-            container.children = [dd]
+            value_container.children = [dd]
         else:
-            container.children = [txt]
+            value_container.children = [txt]
     mode.observe(_on_mode, names="value")
 
     def get_value():
@@ -71,10 +68,10 @@ def list_custom_row(label: str, options, default_value, minv, maxv, step=1, desc
         return int(txt.value)
 
     row = W.HBox(
-        [lab, mode, container],
+        [label_w, mode, value_container],
         layout=W.Layout(align_items="center", gap="12px", flex_flow="row wrap")
     )
-    return row, get_value, (mode, container, dd, txt)
+    return row, get_value, (mode, value_container, dd, txt)
 
 def _logo_widget(branding: dict):
     url = (branding.get("logo_url") or "").strip()
@@ -172,14 +169,14 @@ def launch(
     btn_clear  = W.Button(description="Clear",  button_style="warning", icon="trash")
     out        = W.Output()
 
-    # ---------- Grouped layouts per section ----------
+    # ---------- Grouped layouts (no “Input:” labels anymore) ----------
     pdb_row = W.HBox([pdb_code, W.HTML("&nbsp;"), or_lbl, pdb_upload, file_lbl],
                      layout=W.Layout(align_items="center", justify_content="flex-start",
                                      flex_flow="row wrap", gap="10px"))
 
-    functional_box = W.VBox([W.HTML("<b>Input:</b>"), row_big])
-    mode2_box = W.VBox([init_idx, init_chain, W.HTML("<b>Input:</b>"), row_short, row_np2])
-    mode3_box = W.VBox([init_idx, init_chain, final_idx, final_chain, W.HTML("<b>Input:</b>"), row_np3])
+    functional_box = W.VBox([row_big])
+    mode2_box      = W.VBox([init_idx, init_chain, row_short, row_np2])
+    mode3_box      = W.VBox([init_idx, init_chain, final_idx, final_chain, row_np3])
 
     def _sync_mode(*_):
         functional_box.layout.display = ""
@@ -191,9 +188,8 @@ def launch(
             functional_box.layout.display = "none"; mode3_box.layout.display = ""
     _sync_mode(); pred_type.observe(_sync_mode, names="value")
 
-    # ---------- Render the full UI ----------
-    children = []
-    if logo: children.append(logo)
+    # ---------- Render ----------
+    children = [logo] if logo else []
     children += [
         W.HTML(f"<h3>{show_title}</h3>"),
         pdb_row,
@@ -243,16 +239,14 @@ def launch(
                 if not _is_valid_email(email.value.strip()):
                     raise ValueError("Invalid email format.")
 
-                # obtain PDB bytes & name
                 pdb_bytes, pdb_name = _collect_pdb_bytes()
 
-                # ---- Save PDB to SAVE_DIR ----
+                # ---- Save PDB ----
                 save_path = os.path.join(SAVE_DIR, pdb_name)
-                with open(save_path, "wb") as f:
-                    f.write(pdb_bytes)
+                with open(save_path, "wb") as f: f.write(pdb_bytes)
                 print(f"Saved local copy: {save_path}")
 
-                # ---- Build input file rows based on mode ----
+                # ---- Build input file rows ----
                 input_path = os.path.join(os.path.dirname(save_path), "mcpath_input.txt")
                 mode = pred_type.value
                 if mode == "functional":
@@ -267,27 +261,22 @@ def launch(
                         (email.value.strip() or "-")
                     ]
                 else:  # paths_init_final
-                    if not _is_valid_chain(init_chain.value or ""):
-                        raise ValueError("Chain of initial residue must be a single character.")
-                    if not _is_valid_chain(final_chain.value or ""):
-                        raise ValueError("Chain of final residue must be a single character.")
+                    if not _is_valid_chain(init_chain.value or "") or not _is_valid_chain(final_chain.value or ""):
+                        raise ValueError("Initial/final residue chain must be a single character.")
                     rows = [
                         "3", pdb_name, chain_global,
                         str(int(init_idx.value)), (init_chain.value or "").strip(),
                         str(int(final_idx.value)), (final_chain.value or "").strip(),
                         (email.value.strip() or "-")
                     ]
-
                 with open(input_path, "w") as f:
                     f.write("\n".join([str(r).strip() for r in rows]))
                 print(f"Input file saved: {input_path}")
 
-                # ---- Run readpdb_strict immediately (if available) ----
+                # ---- Run readpdb_strict ----
                 run_readpdb = _try_import_readpdb()
                 cor_path = None
-                if run_readpdb is None:
-                    print("ℹ️ readpdb_strict not found; skipping .cor generation.")
-                else:
+                if run_readpdb:
                     try:
                         cor_path = run_readpdb(input_path=input_path)
                     except TypeError:
@@ -295,15 +284,17 @@ def launch(
                     print(f"✔ COR written: {cor_path}")
                     print(f"   COR exists? {os.path.isfile(cor_path)}")
 
-                    # quick preview
+                    # preview
                     try:
                         with open(cor_path, "r") as f:
                             head = "".join([next(f) for _ in range(5)])
                         print("\nFirst lines of COR:\n" + head)
                     except Exception:
                         pass
+                else:
+                    print("ℹ️ readpdb_strict not found; skipping .cor generation.")
 
-                # ---- Normalize COR name for atomistic (atomistic expects <base>.cor) ----
+                # ---- Normalize COR name for atomistic ----
                 desired_cor = None
                 if cor_path and os.path.isfile(cor_path):
                     desired_cor = os.path.splitext(save_path)[0] + ".cor"   # /content/XXXX.cor
@@ -316,12 +307,12 @@ def launch(
                             print("   (Could not copy COR):", ce)
                             desired_cor = cor_path
 
-                # ---- Run atomistic (creates <pdb>_atomistic.out) ----
+                # ---- Run atomistic ----
                 try:
                     if not desired_cor or not os.path.isfile(desired_cor):
                         print("ℹ️ No .cor available; skipping atomistic LJ step.")
                     else:
-                        # ensure mcpath is importable (useful in Colab)
+                        # ensure mcpath is importable
                         pkg_dir  = os.path.dirname(os.path.abspath(__file__))
                         root_dir = os.path.dirname(pkg_dir)
                         if root_dir not in sys.path:
@@ -337,7 +328,6 @@ def launch(
                             raise
                         atom_mod = importlib.reload(atom_mod)
 
-                        # Absolute paths for param/top inside mcpath
                         param_path = os.path.join(pkg_dir, "vdw_cns.param")
                         top_path   = os.path.join(pkg_dir, "pdb_cns.top")
                         print("   param_path:", param_path, "exists?", os.path.isfile(param_path))
@@ -345,16 +335,11 @@ def launch(
                         if not os.path.isfile(param_path): raise FileNotFoundError(param_path)
                         if not os.path.isfile(top_path):   raise FileNotFoundError(top_path)
 
-                        # Pass the base WITHOUT extension (same base as the .cor)
                         protein_base = os.path.splitext(save_path)[0]  # /content/XXXX
                         print("▶ Running atomistic LJ on base:", protein_base)
                         norm = atom_mod.atomistic(
-                            protein_base,
-                            param_file=param_path,
-                            top_file=top_path,
-                            rcut=5.0,
-                            kT=1.0,
-                            save_txt=True
+                            protein_base, param_file=param_path, top_file=top_path,
+                            rcut=5.0, kT=1.0, save_txt=True
                         )
                         out_path = f"{protein_base}_atomistic.out"
                         print(f"✔ Saved probability matrix: {out_path} (exists? {os.path.isfile(out_path)})")
