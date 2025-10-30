@@ -372,13 +372,54 @@ def launch(
                         # fallback to older signature (pdb_path, chain, ...)
                         cor_path = run_readpdb(pdb_path=save_path, chain=chain_global)
                     print(f"✔ COR written: {cor_path}")
-                    # quick preview
+
+                                    # quick preview
                     try:
                         with open(cor_path, "r") as f:
                             head = "".join([next(f) for _ in range(5)])
                         print("\nFirst lines of COR:\n" + head)
                     except Exception:
                         pass
+                        
+                # ---- Run atomistic (creates <pdb>_atomistic.out) ----
+                    try:
+                        # import/reload so edits take effect without restarting
+                        atom_mod = importlib.import_module("mcpath.atomistic")
+                        importlib.reload(atom_mod)
+
+                        # Use absolute paths for param/top that live inside the mcpath folder
+                        here = os.path.dirname(os.path.abspath(__file__))
+                        param_path = os.path.join(here, "vdw_cns.param")
+                        top_path   = os.path.join(here, "pdb_cns.top")
+
+                        # Pass the PDB *basename without extension* (same base as the .cor)
+                        protein_base = os.path.splitext(save_path)[0]
+
+                        print("▶ Running atomistic LJ…")
+                        norm = atom_mod.atomistic(
+                            protein_base,                 # e.g. "/content/4CFR"
+                            param_file=param_path,        # mcpath/vdw_cns.param
+                            top_file=top_path,            # mcpath/pdb_cns.top
+                            rcut=5.0,
+                            kT=1.0,
+                            save_txt=True                 # writes "<base>_atomistic.out"
+                        )
+                        out_path = f"{protein_base}_atomistic.out"
+                        print(f"✔ Saved probability matrix: {out_path}")
+
+                        # optional: show a small preview
+                        try:
+                            import numpy as np
+                            preview = np.loadtxt(out_path, max_rows=5)
+                            print("Preview (first 5 rows):")
+                            print(preview)
+                        except Exception:
+                            pass
+
+                    except Exception as e:
+                        print("❌ atomistic run failed:", e)
+
+                    
 
                 # ---- Optional POST ----
                 data = {"prediction_mode": mode, FN["chain_id"]: chain_global}
