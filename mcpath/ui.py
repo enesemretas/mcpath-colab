@@ -49,7 +49,7 @@ def _list_or_custom_row(label: str, options, default_value, minv, maxv, step=1):
     dropdown = W.Dropdown(options=options, value=default_value,
                           layout=W.Layout(width="280px", min_width="220px"))
     intbox   = W.BoundedIntText(value=default_value, min=minv, max=maxv, step=step,
-                                layout=W.Layout(width="280px", min_width="220px"))
+                                  layout=W.Layout(width="280px", min_width="220px"))
     value_box = W.Box([dropdown], layout=W.Layout(align_items="center"))
 
     def _on_mode(ch):
@@ -71,7 +71,7 @@ def _list_or_custom_row(label: str, options, default_value, minv, maxv, step=1):
 
     row = W.HBox([lbl, toggle, value_box], layout=W.Layout(align_items="center", gap="12px", width="auto"))
     return row, {'toggle': toggle, 'dropdown': dropdown, 'intbox': intbox,
-                 'get': get_value, 'set_list': set_list, 'set_custom': set_custom}
+                  'get': get_value, 'set_list': set_list, 'set_custom': set_custom}
 
 # -------------------- main UI --------------------
 def launch(
@@ -143,7 +143,7 @@ def launch(
 
     # ---------- Mode 3 ----------
     final_idx   = W.BoundedIntText(value=1, min=1, max=1_000_000, step=1,
-                                   description="Index of final residue:", layout=wide, style=DESC)
+                                    description="Index of final residue:", layout=wide, style=DESC)
     final_chain = W.Text(value="", description="Chain of final residue:", placeholder="B", layout=wide, style=DESC)
 
     num_paths_opts_mode3 = [1000, 2000, 3000, 5000, 10000, 30000, 50000]
@@ -198,25 +198,39 @@ def launch(
 
     # -------------------- handlers --------------------
     def on_clear(_):
-        # Reset form fields
-        pdb_code.value = ""; chain_id.value = ""; email.value = ""
+        # Reset simple text fields to their defaults from config or hardcoded
+        pdb_code.value = str(cfg.get("pdb_code", ""))
+        chain_id.value = str(cfg.get("chain_id", ""))
+        email.value    = str(cfg.get("email", ""))
+
+        # Reset file upload
         file_lbl.value = "No file chosen"
-        for attempt in ((), {}, None):
+        # Try to reset the FileUpload widget (this is the standard way)
+        for attempt in ((), {}, None): 
             try:
                 pdb_upload.value = attempt; break
             except Exception:
                 pass
-        pred_type.value = "functional"
 
-        # Reset toggles to List & first option
-        for ctrl in (big_ctrl, short_ctrl, np2_ctrl, np3_ctrl):
-            ctrl['toggle'].value = "list"
-            first = ctrl['dropdown'].options[0]
-            ctrl['dropdown'].value = first
-            ctrl['intbox'].value   = int(first)
+        # Reset prediction type (this will also trigger _sync_mode)
+        pred_type.value = "functional"  
 
-        # Clear the shared log output (this removes everything printed there)
-        _LOG_OUT.clear_output(wait=True)
+        # Reset mode-specific fields to their initial values
+        init_idx.value = 1
+        init_chain.value = ""
+        final_idx.value = 1
+        final_chain.value = ""
+
+        # Reset list/custom rows to their *original* default values
+        # These vars (big_default, etc.) are from the outer launch() scope
+        big_ctrl['set_list'](big_default)
+        short_ctrl['set_list'](5)    # Default was hardcoded as 5 in launch
+        np2_ctrl['set_list'](1000)   # Default was hardcoded as 1000 in launch
+        np3_ctrl['set_list'](1000)   # Default was hardcoded as 1000 in launch
+
+        # Clear the shared log output
+        if _LOG_OUT:
+            _LOG_OUT.clear_output(wait=True)
 
     def _collect_pdb_bytes():
         if pdb_upload.value:
@@ -277,7 +291,7 @@ def launch(
                     for r in rows: f.write(str(r).strip() + "\n")
                 print(f"Input file saved: {input_path}")
                 print(f"▶ Using input file: {input_path}")
-                print(f"   Mode={mode}, PDB={save_path}, Chain={chain_global}")
+                print(f"    Mode={mode}, PDB={save_path}, Chain={chain_global}")
 
                 run_readpdb = _try_import_readpdb()
                 cor_path = None
@@ -290,7 +304,7 @@ def launch(
                         cor_path = run_readpdb(pdb_path=save_path, chain=chain_global)
                     print(f"✔ Wrote: {cor_path}")
                     print(f"✔ COR written: {cor_path}")
-                    print(f"   COR exists? {os.path.isfile(cor_path)}\n")
+                    print(f"    COR exists? {os.path.isfile(cor_path)}\n")
                     try:
                         with open(cor_path, "r") as f:
                             head = "".join([next(f) for _ in range(5)])
@@ -309,8 +323,8 @@ def launch(
                         here = os.path.dirname(os.path.abspath(__file__))
                         param_path = os.path.join(here, "vdw_cns.param")
                         top_path   = os.path.join(here, "pdb_cns.top")
-                        print(f"   param_path: {param_path} exists? {os.path.isfile(param_path)}")
-                        print(f"   top_path:   {top_path} exists? {os.path.isfile(top_path)}")
+                        print(f"    param_path: {param_path} exists? {os.path.isfile(param_path)}")
+                        print(f"    top_path:   {top_path} exists? {os.path.isfile(top_path)}")
 
                         pkg_dir = os.path.dirname(os.path.abspath(__file__))
                         root_dir = os.path.dirname(pkg_dir)
