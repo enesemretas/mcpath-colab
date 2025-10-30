@@ -3,7 +3,7 @@ import os, re, requests, yaml, importlib, shutil, sys
 from IPython.display import display
 import ipywidgets as W
 
-# ---------- singletons (so Clear always clears the same log panel) ----------
+# ---------- singletons (so New Job/Submit always uses the same log panel) ----------
 _FORM_ROOT = None
 _LOG_OUT   = None
 
@@ -80,6 +80,7 @@ def launch(
 ):
     global _FORM_ROOT, _LOG_OUT
 
+    # --- Configuration loaded here and used for defaults/resetting ---
     cfg = yaml.safe_load(requests.get(defaults_url, timeout=30).text)
     target_url = cfg.get("target_url", "").strip()
     FN = cfg["field_names"]
@@ -129,34 +130,38 @@ def launch(
     get_big_len = big_ctrl['get']
 
     # ---------- Mode 2 ----------
-    init_idx   = W.BoundedIntText(value=1, min=1, max=1_000_000, step=1,
+    init_idx_default = 1 # Added to use for resetting
+    init_idx   = W.BoundedIntText(value=init_idx_default, min=1, max=1_000_000, step=1,
                                   description="Index of initial residue:", layout=wide, style=DESC)
-    init_chain = W.Text(value="", description="Chain of initial residue:", placeholder="A", layout=wide, style=DESC)
+    init_chain_default = "" # Added to use for resetting
+    init_chain = W.Text(value=init_chain_default, description="Chain of initial residue:", placeholder="A", layout=wide, style=DESC)
 
     short_len_opts = [5, 8, 10, 13, 15, 20, 25, 30]
-    row_short, short_ctrl = _list_or_custom_row("Length of Paths", short_len_opts, 5, 1, 10_000, 1)
+    short_len_default = 5 # Added to use for resetting
+    row_short, short_ctrl = _list_or_custom_row("Length of Paths", short_len_opts, short_len_default, 1, 10_000, 1)
     get_short_len = short_ctrl['get']
 
     num_paths_opts_mode2 = [1000, 2000, 3000, 5000, 10000, 20000, 30000, 40000, 50000]
-    row_np2, np2_ctrl = _list_or_custom_row("Number of Paths", num_paths_opts_mode2, 1000, 1, 10_000_000, 100)
+    num_paths_mode2_default = 1000 # Added to use for resetting
+    row_np2, np2_ctrl = _list_or_custom_row("Number of Paths", num_paths_opts_mode2, num_paths_mode2_default, 1, 10_000_000, 100)
     get_num_paths_2 = np2_ctrl['get']
 
     # ---------- Mode 3 ----------
-    final_idx   = W.BoundedIntText(value=1, min=1, max=1_000_000, step=1,
+    final_idx_default = 1 # Added to use for resetting
+    final_idx   = W.BoundedIntText(value=final_idx_default, min=1, max=1_000_000, step=1,
                                     description="Index of final residue:", layout=wide, style=DESC)
-    final_chain = W.Text(value="", description="Chain of final residue:", placeholder="B", layout=wide, style=DESC)
+    final_chain_default = "" # Added to use for resetting
+    final_chain = W.Text(value=final_chain_default, description="Chain of final residue:", placeholder="B", layout=wide, style=DESC)
 
     num_paths_opts_mode3 = [1000, 2000, 3000, 5000, 10000, 30000, 50000]
-    row_np3, np3_ctrl = _list_or_custom_row("Number of Paths", num_paths_opts_mode3, 1000, 1, 10_000_000, 100)
+    num_paths_mode3_default = 1000 # Added to use for resetting
+    row_np3, np3_ctrl = _list_or_custom_row("Number of Paths", num_paths_opts_mode3, num_paths_mode3_default, 1, 10_000_000, 100)
     get_num_paths_3 = np3_ctrl['get']
 
     # Actions & shared output (singleton)
     btn_submit = W.Button(description="Submit", button_style="success", icon="paper-plane")
-    
-    # --- CHANGED ---
-    # Renamed button and changed style/icon
-    btn_new_job = W.Button(description="New Job",  button_style="info", icon="plus")
-    
+    btn_new_job = W.Button(description="New Job",  button_style="info", icon="plus") # Renamed button
+
     if _LOG_OUT is None:
         _LOG_OUT = W.Output()
     out = _LOG_OUT  # reuse the same Output every time
@@ -191,8 +196,6 @@ def launch(
         mode2_box,
         mode3_box,
         chain_id, email,
-        # --- CHANGED ---
-        # Added new button to the HBox
         W.HBox([btn_submit, btn_new_job]),
         W.HTML("<hr>"),
         out
@@ -204,17 +207,39 @@ def launch(
 
     # -------------------- handlers --------------------
     
-    # --- NEW HANDLER ---
-    # This function re-calls launch(), creating a new form instance
+    # --- RENEWED HANDLER: Clears fields on the existing form ---
     def on_new_job(_):
-        # Clear the output log *before* creating the new form
+        # Reset simple text fields to their defaults from config
+        pdb_code.value = str(cfg.get("pdb_code", ""))
+        chain_id.value = str(cfg.get("chain_id", ""))
+        email.value    = str(cfg.get("email", ""))
+
+        # Reset file upload: clears the data and the label
+        file_lbl.value = "No file chosen"
+        for attempt in ((), {}): 
+            try: pdb_upload.value = attempt; break
+            except Exception: pass # Colab/ipywidgets quirk handling
+
+        # Reset prediction type (will trigger _sync_mode)
+        pred_type.value = "functional"  
+
+        # Reset mode-specific fields to their initial values
+        init_idx.value = init_idx_default
+        init_chain.value = init_chain_default
+        final_idx.value = final_idx_default
+        final_chain.value = final_chain_default
+
+        # Reset list/custom rows to their *original* default values
+        big_ctrl['set_list'](big_default)
+        short_ctrl['set_list'](short_len_default) 
+        np2_ctrl['set_list'](num_paths_mode2_default)
+        np3_ctrl['set_list'](num_paths_mode3_default)
+
+        # Clear the shared log output
         if _LOG_OUT:
             _LOG_OUT.clear_output(wait=True)
-        # Re-run the launch function to start fresh
-        launch(defaults_url=defaults_url, show_title=show_title)
-
-    # --- REMOVED ---
-    # The on_clear function is no longer needed.
+            
+        print("UI successfully reset for a new job.")
 
     def _collect_pdb_bytes():
         if pdb_upload.value:
@@ -362,7 +387,5 @@ def launch(
             except Exception as e:
                 print("❌", e)
 
-    # --- CHANGED ---
-    # Pointing the new button to the new handler
     btn_new_job.on_click(on_new_job)
     btn_submit.on_click(on_submit)
