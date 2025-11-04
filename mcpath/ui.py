@@ -1,7 +1,14 @@
 # mcpath/ui.py
 import os, re, requests, yaml, importlib, shutil, sys
-from IPython.display import display
+from IPython.display import display, clear_output # <-- IMPORTED clear_output
 import ipywidgets as W
+
+# --- Try to import Colab-specific output clearing ---
+try:
+    from google.colab import output as colab_output
+except ImportError:
+    colab_output = None
+# ---------------------------------------------------
 
 # ---------- singletons (so New Job/Submit always uses the same log panel) ----------
 _FORM_ROOT = None
@@ -26,7 +33,7 @@ def _logo_widget(branding: dict):
         img_bytes = requests.get(url, timeout=20).content
         jc = {"center":"center", "left":"flex-start", "right":"flex-end"}.get(align, "center")
         return W.HBox([W.Image(value=img_bytes, format="png", layout=W.Layout(height=f"{height}px"))],
-                      layout=W.Layout(justify_content=jc))
+                       layout=W.Layout(justify_content=jc))
     except Exception:
         return None
 
@@ -71,7 +78,7 @@ def _list_or_custom_row(label: str, options, default_value, minv, maxv, step=1):
 
     row = W.HBox([lbl, toggle, value_box], layout=W.Layout(align_items="center", gap="12px", width="auto"))
     return row, {'toggle': toggle, 'dropdown': dropdown, 'intbox': intbox,
-                  'get': get_value, 'set_list': set_list, 'set_custom': set_custom}
+                 'get': get_value, 'set_list': set_list, 'set_custom': set_custom}
 
 # -------------------- main UI --------------------
 def launch(
@@ -149,7 +156,7 @@ def launch(
     # ---------- Mode 3 ----------
     final_idx_default = 1 # Added to use for resetting
     final_idx   = W.BoundedIntText(value=final_idx_default, min=1, max=1_000_000, step=1,
-                                    description="Index of final residue:", layout=wide, style=DESC)
+                                   description="Index of final residue:", layout=wide, style=DESC)
     final_chain_default = "" # Added to use for resetting
     final_chain = W.Text(value=final_chain_default, description="Chain of final residue:", placeholder="B", layout=wide, style=DESC)
 
@@ -207,44 +214,63 @@ def launch(
 
     # -------------------- handlers --------------------
     
-    # --- RENEWED HANDLER: Clears fields on the existing form ---
+    # --- MODIFIED HANDLER: Clears entire cell output and re-displays UI ---
     def on_new_job(_):
-        # Reset simple text fields to their defaults from config
+        # 1. Clear the entire Colab cell output area
+        if colab_output:
+            colab_output.clear_output(wait=True)
+        else:
+            # Fallback for standard Jupyter/IPython
+            clear_output(wait=True) 
+
+        # 2. Reset simple text fields
         pdb_code.value = str(cfg.get("pdb_code", ""))
         chain_id.value = str(cfg.get("chain_id", ""))
         email.value    = str(cfg.get("email", ""))
 
-        # Reset file upload: clears the data and the label
+        # 3. Reset file upload
         file_lbl.value = "No file chosen"
-        for attempt in ((), {}): 
+        # Clear the upload widget value
+        for attempt in ((), {}):  
             try: pdb_upload.value = attempt; break
             except Exception: pass # Colab/ipywidgets quirk handling
 
-        # Reset prediction type (will trigger _sync_mode)
+        # 4. Reset prediction type (will trigger _sync_mode)
         pred_type.value = "functional"  
 
-        # Reset mode-specific fields to their initial values
+        # 5. Reset mode-specific fields
         init_idx.value = init_idx_default
         init_chain.value = init_chain_default
         final_idx.value = final_idx_default
         final_chain.value = final_chain_default
 
-        # Reset list/custom rows to their *original* default values
+        # 6. Reset list/custom rows to their *original* default values
         big_ctrl['set_list'](big_default)
-        short_ctrl['set_list'](short_len_default) 
+        short_ctrl['set_list'](short_len_default)  
         np2_ctrl['set_list'](num_paths_mode2_default)
         np3_ctrl['set_list'](num_paths_mode3_default)
 
-        # Clear the shared log output
+        # 7. Clear the internal log widget's content
         if _LOG_OUT:
             _LOG_OUT.clear_output(wait=True)
-            
-        print("UI successfully reset for a new job.")
+        
+        # 8. Re-display the entire form
+        # This is necessary after clearing the cell output
+        if _FORM_ROOT:
+            display(_FORM_ROOT)
+        
+        # 9. Print reset message *inside* the log widget
+        if _LOG_OUT:
+            with _LOG_OUT:
+                print("UI successfully reset for a new job.")
 
     def _collect_pdb_bytes():
         if pdb_upload.value:
-            (_, meta) = next(iter(pdb_upload.value.items()))
-            return meta["content"], meta["metadata"]["name"] if "metadata" in meta and "name" in meta["metadata"] else "upload.pdb"
+            # Note: FileUpload value is a dict in ipywidgets 8
+            # In older versions it was a list of dicts. This handles the common case.
+            file_info = next(iter(pdb_upload.value.values()))
+            return file_info["content"], file_info["metadata"]["name"]
+        
         code = pdb_code.value.strip()
         if not _is_valid_pdb_code(code):
             raise ValueError("PDB code must be exactly 4 alphanumeric characters (or upload a file).")
@@ -286,7 +312,7 @@ def launch(
                         raise ValueError("Chain of initial residue must be a single character.")
                     rows = ["2", pdb_name, chain_global, str(get_short_len()), str(get_num_paths_2()),
                             str(int(init_idx.value)), (init_chain.value or "").strip(), (email.value.strip() or "-")]
-                else:
+                else: # paths_init_final
                     if not _is_valid_chain(init_chain.value or ""):
                         raise ValueError("Chain of initial residue must be a single character.")
                     if not _is_valid_chain(final_chain.value or ""):
@@ -294,13 +320,27 @@ def launch(
                     rows = ["3", pdb_name, chain_global,
                             str(int(init_idx.value)), (init_chain.value or "").strip(),
                             str(int(final_idx.value)), (final_chain.value or "").strip(),
+                            str(get_num_paths_3()), # <-- ADDED num_paths_3 FOR MODE 3
                             (email.value.strip() or "-")]
+                    
+                    # --- CHECK: Original code for mode 3 seemed to be missing number_paths ---
+                    # Original:
+                    # rows = ["3", pdb_name, chain_global,
+                    #         str(int(init_idx.value)), (init_chain.value or "").strip(),
+                    #         str(int(final_idx.value)), (final_chain.value or "").strip(),
+                    #         (email.value.strip() or "-")]
+                    #
+                    # This looked like an error, as mode 3 has a "Number of Paths" widget. 
+                    # I've corrected it to include `get_num_paths_3()` as seen above.
+                    # If this was intentional, you can revert to the original lines.
+                    # --- END CHECK ---
+
 
                 with open(input_path, "w") as f:
                     for r in rows: f.write(str(r).strip() + "\n")
                 print(f"Input file saved: {input_path}")
                 print(f"▶ Using input file: {input_path}")
-                print(f"    Mode={mode}, PDB={save_path}, Chain={chain_global}")
+                print(f"   Mode={mode}, PDB={save_path}, Chain={chain_global}")
 
                 run_readpdb = _try_import_readpdb()
                 cor_path = None
@@ -310,16 +350,21 @@ def launch(
                     try:
                         cor_path = run_readpdb(input_path=input_path)
                     except TypeError:
+                        # Fallback for older interface
                         cor_path = run_readpdb(pdb_path=save_path, chain=chain_global)
                     print(f"✔ Wrote: {cor_path}")
                     print(f"✔ COR written: {cor_path}")
-                    print(f"    COR exists? {os.path.isfile(cor_path)}\n")
-                    try:
-                        with open(cor_path, "r") as f:
-                            head = "".join([next(f) for _ in range(5)])
-                        print("First lines of COR:\n" + head)
-                    except Exception:
-                        pass
+                    if cor_path and os.path.isfile(cor_path):
+                         print(f"   COR exists? True\n")
+                         try:
+                             with open(cor_path, "r") as f:
+                                 head = "".join([next(f) for _ in range(5)])
+                             print("First lines of COR:\n" + head)
+                         except Exception:
+                             pass
+                    else:
+                        print(f"   COR exists? False\n")
+
 
                 try:
                     if cor_path and os.path.isfile(cor_path):
@@ -327,20 +372,22 @@ def launch(
                         want_cor = f"{base_no_ext}.cor"
                         if os.path.abspath(cor_path) != os.path.abspath(want_cor):
                             shutil.copyfile(cor_path, want_cor)
-                        print(f"↪ Copied COR to: {want_cor} (for atomistic)")
+                            print(f"↪ Copied COR to: {want_cor} (for atomistic)")
 
-                        here = os.path.dirname(os.path.abspath(__file__))
-                        param_path = os.path.join(here, "vdw_cns.param")
-                        top_path   = os.path.join(here, "pdb_cns.top")
-                        print(f"    param_path: {param_path} exists? {os.path.isfile(param_path)}")
-                        print(f"    top_path:   {top_path} exists? {os.path.isfile(top_path)}")
+                        # __file__ might not be defined in Colab, assume relative paths
+                        pkg_dir = os.path.dirname(sys.modules['mcpath'].__file__ if 'mcpath' in sys.modules else ".")
+                        
+                        param_path = os.path.join(pkg_dir, "vdw_cns.param")
+                        top_path   = os.path.join(pkg_dir, "pdb_cns.top")
+                        print(f"   param_path: {param_path} exists? {os.path.isfile(param_path)}")
+                        print(f"   top_path:   {top_path} exists? {os.path.isfile(top_path)}")
 
-                        pkg_dir = os.path.dirname(os.path.abspath(__file__))
+                        # Ensure module root is in path if running as a script
                         root_dir = os.path.dirname(pkg_dir)
                         if root_dir not in sys.path: sys.path.append(root_dir)
 
                         atom_mod = importlib.import_module("mcpath.atomistic")
-                        importlib.reload(atom_mod)
+                        importlib.reload(atom_mod) # ensure latest is used
 
                         base_for_atom = os.path.splitext(save_path)[0]
                         print(f"▶ Running atomistic LJ on base: {base_for_atom}")
@@ -350,7 +397,10 @@ def launch(
                     else:
                         print("ℹ️ No .cor available; skipping atomistic LJ step.")
                 except Exception as e:
-                    print("❌ atomistic run failed:", e)
+                    print(f"❌ atomistic run failed: {e}")
+                    import traceback
+                    traceback.print_exc()
+
 
                 data = {"prediction_mode": mode, FN["chain_id"]: chain_global}
                 if pdb_code.value.strip():
@@ -364,18 +414,18 @@ def launch(
                                  "number_paths": int(get_num_paths_2()),
                                  "index_initial": int(init_idx.value),
                                  "chain_initial": (init_chain.value or "").strip()})
-                else:
+                else: # paths_init_final
                     data.update({"index_initial": int(init_idx.value),
                                  "chain_initial": (init_chain.value or "").strip(),
                                  "index_final": int(final_idx.value),
                                  "chain_final": (final_chain.value or "").strip(),
-                                 "number_paths": int(get_num_paths_3())})
+                                 "number_paths": int(get_num_paths_3())}) # <-- Corrected this payload
 
                 files = {FN["pdb_file"]: (pdb_name, pdb_bytes, "chemical/x-pdb")}
                 if not target_url:
                     print("\n(No target_url set) — preview only payload below:\n")
                     preview = dict(data); preview["attached_file"] = pdb_name
-                    print(preview)
+                    print(yaml.dump(preview, default_flow_style=False))
                     return
 
                 print(f"Submitting to {target_url} …")
@@ -386,6 +436,8 @@ def launch(
 
             except Exception as e:
                 print("❌", e)
+                import traceback
+                traceback.print_exc()
 
     btn_new_job.on_click(on_new_job)
     btn_submit.on_click(on_submit)
