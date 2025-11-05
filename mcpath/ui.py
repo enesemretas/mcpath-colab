@@ -2,7 +2,6 @@
 
 import os, re, requests, yaml, importlib, shutil, sys
 from IPython.display import display
-# Removed: from IPython import get_ipython
 import ipywidgets as W
 
 # ---------- singletons (so New Job/Submit always uses the same log panel) ----------
@@ -39,7 +38,9 @@ def _list_or_custom_row(label: str, options, default_value, minv, maxv, step=1):
     if default_value not in options:
         options = sorted(options + [default_value])
 
-    lbl = W.Label(f"{label if label.endsWith(':') else label + ':'}", layout=W.Layout(width="180px"))
+    # --- FIXED LINE ---
+    lbl = W.Label(f"{label if label.endswith(':') else label + ':'}", layout=W.Layout(width="180px"))
+    # ------------------
 
     toggle = W.ToggleButtons(
         options=[("List", "list"), ("Custom", "custom")],
@@ -209,7 +210,7 @@ def launch(
 
     # -------------------- handlers --------------------
     
-    # --- EDITED HANDLER: Clears fields on the existing form to reset the UI ---
+    # --- RENEWED HANDLER: Clears fields on the existing form ---
     def on_new_job(_):
         # Reset simple text fields to their defaults from config
         pdb_code.value = str(cfg.get("pdb_code", ""))
