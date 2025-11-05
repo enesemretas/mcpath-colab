@@ -2,7 +2,7 @@
 
 import os, re, requests, yaml, importlib, shutil, sys
 from IPython.display import display
-from IPython import get_ipython # Added for kernel restart
+# Removed: from IPython import get_ipython
 import ipywidgets as W
 
 # ---------- singletons (so New Job/Submit always uses the same log panel) ----------
@@ -39,7 +39,7 @@ def _list_or_custom_row(label: str, options, default_value, minv, maxv, step=1):
     if default_value not in options:
         options = sorted(options + [default_value])
 
-    lbl = W.Label(f"{label if label.endswith(':') else label + ':'}", layout=W.Layout(width="180px"))
+    lbl = W.Label(f"{label if label.endsWith(':') else label + ':'}", layout=W.Layout(width="180px"))
 
     toggle = W.ToggleButtons(
         options=[("List", "list"), ("Custom", "custom")],
@@ -209,27 +209,44 @@ def launch(
 
     # -------------------- handlers --------------------
     
-    # --- EDITED HANDLER: Restarts the entire Python kernel ---
+    # --- EDITED HANDLER: Clears fields on the existing form to reset the UI ---
     def on_new_job(_):
+        # Reset simple text fields to their defaults from config
+        pdb_code.value = str(cfg.get("pdb_code", ""))
+        chain_id.value = str(cfg.get("chain_id", ""))
+        email.value    = str(cfg.get("email", ""))
+
+        # Reset file upload: clears the data and the label
+        file_lbl.value = "No file chosen"
+        # Use a loop to try clearing the FileUpload widget, as its behavior
+        # can vary between ipywidgets versions or environments (e.g., Colab)
+        for attempt in ((), {}):  
+            try: 
+                pdb_upload.value = attempt
+                break
+            except Exception: 
+                pass # Try the next empty value
+
+        # Reset prediction type (this will also trigger _sync_mode)
+        pred_type.value = "functional"  
+
+        # Reset mode-specific fields to their initial values
+        init_idx.value = init_idx_default
+        init_chain.value = init_chain_default
+        final_idx.value = final_idx_default
+        final_chain.value = final_chain_default
+
+        # Reset list/custom rows to their *original* default values
+        big_ctrl['set_list'](big_default)
+        short_ctrl['set_list'](short_len_default) 
+        np2_ctrl['set_list'](num_paths_mode2_default)
+        np3_ctrl['set_list'](num_paths_mode3_default)
+
+        # Clear the shared log output
         if _LOG_OUT:
             _LOG_OUT.clear_output(wait=True)
             with _LOG_OUT:
-                print("Attempting to restart the Python kernel...")
-                print("After restarting, you will need to re-run the code to launch the UI.")
-        
-        try:
-            # Get the IPython instance and restart the kernel
-            # This is a 'hard' restart that restarts the code
-            get_ipython().kernel.do_shutdown(restart=True)
-        except Exception as e:
-            if _LOG_OUT:
-                with _LOG_OUT:
-                    print(f"Kernel restart failed: {e}")
-                    print("Note: Kernel restart only works in environments like Jupyter or Google Colab.")
-            else:
-                # Fallback if log isn't ready
-                print(f"Kernel restart failed: {e}")
-                print("Note: Kernel restart only works in environments like Jupyter or Google Colab.")
+                print("UI successfully reset for a new job.")
 
     def _collect_pdb_bytes():
         if pdb_upload.value:
