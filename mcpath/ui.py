@@ -1,6 +1,6 @@
 # mcpath/ui.py
 import os, re, requests, yaml, importlib, shutil, sys
-from IPython.display import display
+from IPython.display import display, clear_output
 import ipywidgets as W
 
 # ---------- singletons (so New Job/Submit always uses the same log panel) ----------
@@ -130,37 +130,37 @@ def launch(
     get_big_len = big_ctrl['get']
 
     # ---------- Mode 2 ----------
-    init_idx_default = 1 # Added to use for resetting
+    init_idx_default = 1
     init_idx   = W.BoundedIntText(value=init_idx_default, min=1, max=1_000_000, step=1,
                                   description="Index of initial residue:", layout=wide, style=DESC)
-    init_chain_default = "" # Added to use for resetting
+    init_chain_default = ""
     init_chain = W.Text(value=init_chain_default, description="Chain of initial residue:", placeholder="A", layout=wide, style=DESC)
 
     short_len_opts = [5, 8, 10, 13, 15, 20, 25, 30]
-    short_len_default = 5 # Added to use for resetting
+    short_len_default = 5
     row_short, short_ctrl = _list_or_custom_row("Length of Paths", short_len_opts, short_len_default, 1, 10_000, 1)
     get_short_len = short_ctrl['get']
 
     num_paths_opts_mode2 = [1000, 2000, 3000, 5000, 10000, 20000, 30000, 40000, 50000]
-    num_paths_mode2_default = 1000 # Added to use for resetting
+    num_paths_mode2_default = 1000
     row_np2, np2_ctrl = _list_or_custom_row("Number of Paths", num_paths_opts_mode2, num_paths_mode2_default, 1, 10_000_000, 100)
     get_num_paths_2 = np2_ctrl['get']
 
     # ---------- Mode 3 ----------
-    final_idx_default = 1 # Added to use for resetting
+    final_idx_default = 1
     final_idx   = W.BoundedIntText(value=final_idx_default, min=1, max=1_000_000, step=1,
                                     description="Index of final residue:", layout=wide, style=DESC)
-    final_chain_default = "" # Added to use for resetting
+    final_chain_default = ""
     final_chain = W.Text(value=final_chain_default, description="Chain of final residue:", placeholder="B", layout=wide, style=DESC)
 
     num_paths_opts_mode3 = [1000, 2000, 3000, 5000, 10000, 30000, 50000]
-    num_paths_mode3_default = 1000 # Added to use for resetting
+    num_paths_mode3_default = 1000
     row_np3, np3_ctrl = _list_or_custom_row("Number of Paths", num_paths_opts_mode3, num_paths_mode3_default, 1, 10_000_000, 100)
     get_num_paths_3 = np3_ctrl['get']
 
     # Actions & shared output (singleton)
     btn_submit = W.Button(description="Submit", button_style="success", icon="paper-plane")
-    btn_new_job = W.Button(description="New Job",  button_style="info", icon="plus") # Renamed button
+    btn_new_job = W.Button(description="New Job",  button_style="info", icon="plus")
 
     if _LOG_OUT is None:
         _LOG_OUT = W.Output()
@@ -206,40 +206,29 @@ def launch(
     display(root)
 
     # -------------------- handlers --------------------
-    
-    # --- RENEWED HANDLER: Clears fields on the existing form ---
+
+    # --- HARD RESET & RERUN: rebuilds the entire UI fresh (including upload) ---
     def on_new_job(_):
-        # Reset simple text fields to their defaults from config
-        pdb_code.value = str(cfg.get("pdb_code", ""))
-        chain_id.value = str(cfg.get("chain_id", ""))
-        email.value    = str(cfg.get("email", ""))
+        global _FORM_ROOT, _LOG_OUT
+        try:
+            if _LOG_OUT:
+                _LOG_OUT.clear_output(wait=True)
+        except Exception:
+            pass
+        try:
+            if _FORM_ROOT:
+                _FORM_ROOT.close()  # remove old widget tree from front-end
+        except Exception:
+            pass
 
-        # Reset file upload: clears the data and the label
-        file_lbl.value = "No file chosen"
-        for attempt in ((), {}): 
-            try: pdb_upload.value = attempt; break
-            except Exception: pass # Colab/ipywidgets quirk handling
+        # Reset singletons so a brand-new Output and form are created
+        _FORM_ROOT = None
+        _LOG_OUT   = None
 
-        # Reset prediction type (will trigger _sync_mode)
-        pred_type.value = "functional"  
-
-        # Reset mode-specific fields to their initial values
-        init_idx.value = init_idx_default
-        init_chain.value = init_chain_default
-        final_idx.value = final_idx_default
-        final_chain.value = final_chain_default
-
-        # Reset list/custom rows to their *original* default values
-        big_ctrl['set_list'](big_default)
-        short_ctrl['set_list'](short_len_default) 
-        np2_ctrl['set_list'](num_paths_mode2_default)
-        np3_ctrl['set_list'](num_paths_mode3_default)
-
-        # Clear the shared log output
-        if _LOG_OUT:
-            _LOG_OUT.clear_output(wait=True)
-            
-        print("UI successfully reset for a new job.")
+        # Clear notebook cell output and re-run the launcher
+        clear_output(wait=True)
+        # Re-launch with the same parameters (full rebuild)
+        launch(defaults_url=defaults_url, show_title=show_title)
 
     def _collect_pdb_bytes():
         if pdb_upload.value:
