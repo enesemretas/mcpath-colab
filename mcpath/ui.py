@@ -1,5 +1,5 @@
 # mcpath/ui.py
-import os, re, requests, yaml, importlib, shutil, sys
+import os, re, requests, yaml, importlib, shutil, sys, glob
 from IPython.display import display, clear_output
 import ipywidgets as W
 
@@ -221,13 +221,9 @@ def launch(
         except Exception:
             pass
 
-        # Reset singletons so a brand-new Output and form are created
         _FORM_ROOT = None
         _LOG_OUT   = None
-
-        # Clear notebook cell output and re-run the launcher
         clear_output(wait=True)
-        # Re-launch with the same parameters (full rebuild)
         launch(defaults_url=defaults_url, show_title=show_title)
 
     def _collect_pdb_bytes():
@@ -249,6 +245,21 @@ def launch(
                 return run_readpdb
             except Exception:
                 return None
+
+    # >>> NEW: helper to copy with auto-suffix if destination exists
+    def _copy_unique(src_path: str, dst_basename: str, work_dir: str):
+        dst = os.path.join(work_dir, dst_basename)
+        if not os.path.exists(dst):
+            shutil.copyfile(src_path, dst)
+            return dst
+        # add _1, _2, ...
+        k = 1
+        while True:
+            cand = f"{dst}_{k}"
+            if not os.path.exists(cand):
+                shutil.copyfile(src_path, cand)
+                return cand
+            k += 1
 
     def on_submit(_):
         _LOG_OUT.clear_output(wait=True)  # always clear the shared area first
@@ -336,11 +347,51 @@ def launch(
                         norm = atom_mod.atomistic(base_for_atom, param_file=param_path, top_file=top_path,
                                                   rcut=5.0, kT=1.0, save_txt=True)
                         print(f"✔ Saved probability matrix: {base_for_atom}_atomistic.out")
+
+                        # >>> NEW: If mode == functional, run infinite.py and copy to fixed names
+                        if mode == "functional":
+                            try:
+                                # Ensure mcpath is importable (already added root_dir above)
+                                inf_mod = importlib.import_module("mcpath.infinite")
+                                importlib.reload(inf_mod)
+
+                                # Run infinite from the directory where the files live
+                                work_dir = os.path.dirname(save_path)
+                                old_cwd = os.getcwd()
+                                try:
+                                    os.chdir(work_dir)
+                                    steps = int(get_big_len())
+                                    print(f"▶ Running infinite path generator: ProteinName={os.path.basename(base_for_atom)}, steps={steps}")
+                                    path_arr = inf_mod.infinite(os.path.basename(base_for_atom), path_length=steps, pottype='1')
+                                    pl = path_arr.shape[1]
+                                    path_src = f"{os.path.basename(base_for_atom)}_atomistic_{pl}steps_infinite.path"
+                                    path_src = os.path.join(work_dir, path_src)
+                                finally:
+                                    os.chdir(old_cwd)
+
+                                # Sources to copy (MATLAB: f = {a{2}.cor, a{2}_atomistic.out, a{2}_atomistic_<steps>steps_infinite.path})
+                                cor_src  = f"{base_for_atom}.cor"
+                                atom_src = f"{base_for_atom}_atomistic.out"
+
+                                # Copy to fixed names with auto-suffix if needed (MATLAB b = {'coor_file','atom_file','path_file'})
+                                coor_fixed = _copy_unique(cor_src,  "coor_file", work_dir=os.path.dirname(cor_src))
+                                atom_fixed = _copy_unique(atom_src, "atom_file", work_dir=os.path.dirname(atom_src))
+                                path_fixed = _copy_unique(path_src, "path_file", work_dir=os.path.dirname(path_src))
+
+                                print(f"✔ Fixed copies:")
+                                print(f"   {cor_src}  →  {coor_fixed}")
+                                print(f"   {atom_src} →  {atom_fixed}")
+                                print(f"   {path_src} →  {path_fixed}")
+
+                            except Exception as e_inf:
+                                print("❌ infinite path generation/copy failed:", e_inf)
+
                     else:
                         print("ℹ️ No .cor available; skipping atomistic LJ step.")
                 except Exception as e:
                     print("❌ atomistic run failed:", e)
 
+                # (Submission preview / POST unchanged)
                 data = {"prediction_mode": mode, FN["chain_id"]: chain_global}
                 if pdb_code.value.strip():
                     data[FN["pdb_code"]] = pdb_code.value.strip().upper()
