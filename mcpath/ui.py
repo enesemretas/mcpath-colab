@@ -1,7 +1,7 @@
 # mcpath/ui.py
 import os, re, requests, yaml, importlib, shutil, sys
 from IPython.display import display
-from IPython.display import display, clear_output # <-- IMPORTED clear_output
+from IPython.display import display, clear_output
 import ipywidgets as W
 
 # --- Try to import Colab-specific output clearing ---
@@ -93,24 +93,48 @@ def _make_list_custom_row(description: str,
 
 # -------------------- main UI --------------------
 def launch(
-    config_path: str,
+    config_path: str = None,
+    defaults_url: str = None,
     target_url: str = None,
     config_overrides: dict = {},
     field_names: dict = {},
-    branding: dict = {}
+    branding: dict = {},
+    show_title: str = None
 ):
     """
     Renders the McPath submit UI.
-    config_path: Path to YAML config file.
+    config_path: Path to local YAML config file (optional).
+    defaults_url: URL to remote YAML config file (optional, fallback).
     target_url: If provided, shows a "Submit" button that POSTs data.
+    show_title: If provided, displays a title string at the top of the UI.
     """
     global _FORM_ROOT, _LOG_OUT
+    
+    # --- Load Config ---
     cfg = {}
-    if config_path and os.path.isfile(config_path):
-        with open(config_path, "r") as f:
-            cfg = yaml.safe_load(f)
+    config_source = config_path if config_path else defaults_url
+    
+    if config_source:
+        try:
+            if config_source.startswith("http://") or config_source.startswith("https://"):
+                # It's a URL, download it
+                print(f"Loading config from URL: {config_source}")
+                r = requests.get(config_source, timeout=10)
+                r.raise_for_status()
+                cfg = yaml.safe_load(r.text)
+            elif os.path.isfile(config_source):
+                # It's a local file
+                print(f"Loading config from path: {config_source}")
+                with open(config_source, "r") as f:
+                    cfg = yaml.safe_load(f)
+            else:
+                if config_path or defaults_url: # Only print warning if a source was given
+                    print(f"Warning: config_source '{config_source}' is not a valid file path or URL.")
+        except Exception as e:
+            print(f"Error loading config from {config_source}: {e}")
+            
     cfg.update(config_overrides)
-
+    
     FN = { # Default field names for POST request
         "pdb_file": "pdb_file",
         "pdb_code": "pdb_code",
@@ -209,8 +233,16 @@ def launch(
 
     # -------------------- Layout --------------------
     logo_widget = _logo_widget(branding)
+    
+    # Create a title widget if show_title is provided
+    title_widget = None
+    if show_title:
+        title_widget = W.HTML(f"<h2 style='text-align: center; margin-bottom: 10px;'>{show_title}</h2>",
+                            layout=W.Layout(width='100%'))
+
     layout = W.VBox([
         *([logo_widget] if logo_widget else []),
+        *([title_widget] if title_widget else []), # Add title widget here
         W.HBox([pdb_code, chain_id, file_lbl, pdb_upload], layout=W.Layout(gap="12px", align_items="center")),
         pred_type,
         mode1_controls,
@@ -231,6 +263,8 @@ def launch(
 
         # Show/hide based on mode
         with _LOG_OUT:
+            # Clear previous mode message if you want
+            # _LOG_OUT.clear_output(wait=True) 
             print(f"Mode set to: {mode}")
     pred_type.observe(_sync_mode, 'value')
     _sync_mode() # Initial sync
@@ -412,7 +446,7 @@ def launch(
                         try:
                             with open(cor_path, "r") as f:
                                 head = "".join([next(f) for _ in range(5)])
-                            print("First lines of COR:\n" + head)
+                            print("First lines of COR:\n"H + head)
                         except Exception:
                             pass
                     else:
