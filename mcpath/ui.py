@@ -446,7 +446,7 @@ def launch(
                         try:
                             with open(cor_path, "r") as f:
                                 head = "".join([next(f) for _ in range(5)])
-                            print("First lines of COR:\n"H + head)
+                            print("First lines of COR:\n" + head)
                         except Exception:
                             pass
                     else:
