@@ -246,7 +246,7 @@ def launch(
             except Exception:
                 return None
 
-    # >>> NEW: helper to copy with auto-suffix if destination exists
+    # helper to copy with auto-suffix if destination exists
     def _copy_unique(src_path: str, dst_basename: str, work_dir: str):
         dst = os.path.join(work_dir, dst_basename)
         if not os.path.exists(dst):
@@ -348,14 +348,13 @@ def launch(
                                                   rcut=5.0, kT=1.0, save_txt=True)
                         print(f"✔ Saved probability matrix: {base_for_atom}_atomistic.out")
 
-                        # >>> NEW: If mode == functional, run infinite.py and copy to fixed names
+                        # If mode == functional, run infinite.py and copy to fixed names, then run closeness.py
                         if mode == "functional":
                             try:
-                                # Ensure mcpath is importable (already added root_dir above)
+                                # 1) Run infinite (long path generator)
                                 inf_mod = importlib.import_module("mcpath.infinite")
                                 importlib.reload(inf_mod)
 
-                                # Run infinite from the directory where the files live
                                 work_dir = os.path.dirname(save_path)
                                 old_cwd = os.getcwd()
                                 try:
@@ -369,11 +368,10 @@ def launch(
                                 finally:
                                     os.chdir(old_cwd)
 
-                                # Sources to copy (MATLAB: f = {a{2}.cor, a{2}_atomistic.out, a{2}_atomistic_<steps>steps_infinite.path})
+                                # 2) Copy sources to fixed names (with auto-suffix if exist)
                                 cor_src  = f"{base_for_atom}.cor"
                                 atom_src = f"{base_for_atom}_atomistic.out"
 
-                                # Copy to fixed names with auto-suffix if needed (MATLAB b = {'coor_file','atom_file','path_file'})
                                 coor_fixed = _copy_unique(cor_src,  "coor_file", work_dir=os.path.dirname(cor_src))
                                 atom_fixed = _copy_unique(atom_src, "atom_file", work_dir=os.path.dirname(atom_src))
                                 path_fixed = _copy_unique(path_src, "path_file", work_dir=os.path.dirname(path_src))
@@ -383,8 +381,21 @@ def launch(
                                 print(f"   {atom_src} →  {atom_fixed}")
                                 print(f"   {path_src} →  {path_fixed}")
 
+                                # 3) Run closeness (shortest paths & centrality)
+                                close_mod = importlib.import_module("mcpath.closeness")
+                                importlib.reload(close_mod)
+
+                                try:
+                                    os.chdir(work_dir)
+                                    print("▶ Running closeness (shortest paths + closeness centrality)…")
+                                    close_mod.main()
+                                    print("✔ Wrote: shortest_paths_all_pairs_chain1")
+                                    print("✔ Wrote: closeness_float")
+                                finally:
+                                    os.chdir(old_cwd)
+
                             except Exception as e_inf:
-                                print("❌ infinite path generation/copy failed:", e_inf)
+                                print("❌ infinite/closeness pipeline failed:", e_inf)
 
                     else:
                         print("ℹ️ No .cor available; skipping atomistic LJ step.")
