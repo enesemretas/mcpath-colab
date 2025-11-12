@@ -1,29 +1,28 @@
 # closeness.py
-# Efficient all-pairs shortest contiguous paths + closeness centrality
-# Uses most recent coor_file[_N], atom_file[_N], path_file[_N] in current directory.
+# Direct translation of MATLAB "closeness" function
+# - Reads latest path_file[_N], coor_file[_N], atom_file[_N] in current dir
+# - Computes shortest_paths_all_pairs_chain1 and closeness_float
 
 import os
 import re
-import math
 import numpy as np
 
 # --------------------------- configuration ---------------------------
-IN_PATH_BASE = "path_file"                  # tab-separated; first row = long path
-IN_COOR_BASE = "coor_file"                  # numeric; col1=resID, cols6-8=CA xyz, col10=chainID
-IN_ATOM_BASE = "atom_file"                  # optional, only reported
+IN_PATH_BASE = "path_file"      # tab-separated; first row = long path
+IN_COOR_BASE = "coor_file"      # numeric; col1=resID, cols6-8=CA xyz, col10=chainID
+IN_ATOM_BASE = "atom_file"      # optional, just reported
 
-PATHS_OUT     = "shortest_paths_all_pairs_chain1"
-CLOSENESS_OUT = "closeness_float"
-
-CHAIN_ID_SELECTED = 1                       # which chain to analyze
-TOL = 1e-9                                   # tie tolerance
+PATHS_FILE      = "shortest_paths_all_pairs_chain1"
+CLOSENESS_FILE  = "closeness_float"
+CHAIN_ID_SELECTED = 1
+TOL = 1e-9
 # --------------------------------------------------------------------
 
 
 def _pick_latest(basename: str, directory: str = ".") -> str:
     """
     Pick the latest file among basename, basename_2, basename_3, ... in `directory`.
-    'Latest' = the one with the highest numeric suffix (no suffix = 0).
+    'Latest' = highest numeric suffix (no suffix = 0).
     """
     pattern = re.compile(rf"^{re.escape(basename)}(?:_(\d+))?$")
     best = None
@@ -41,13 +40,13 @@ def _pick_latest(basename: str, directory: str = ".") -> str:
 
 
 def _load_path_first_row(pathfile: str) -> np.ndarray:
-    # Load full matrix (variable width), keep only first row, coerce non-finite to 0
+    # MATLAB: P = readmatrix(...); P(~isfinite(P))=0; seq = P(1,:); seq = seq(seq~=0);
     P = np.loadtxt(pathfile, delimiter="\t", ndmin=2)
     if P.ndim == 1:
         P = P.reshape(1, -1)
     P[~np.isfinite(P)] = 0.0
     seq = P[0, :]
-    seq = seq[seq != 0]  # drop zeros
+    seq = seq[seq != 0]
     if seq.size < 2:
         raise ValueError("Path too short (need at least 2 nodes).")
     return seq
@@ -56,24 +55,17 @@ def _load_path_first_row(pathfile: str) -> np.ndarray:
 def _load_coor_matrix(coorfile: str) -> np.ndarray:
     coor = np.loadtxt(coorfile)
     if coor.ndim != 2 or coor.shape[1] < 10:
-        raise ValueError("coor_file must have at least 10 columns.")
+        raise ValueError("coor_file must have at least 10 columns (got shape %s)" % (coor.shape,))
     return coor
 
 
-def _optional_load_atom(atomfile: str):
-    try:
-        _ = np.loadtxt(atomfile)
-    except Exception:
-        print(f"⚠️  Could not read atom_file '{atomfile}'. Continuing.")
-
-
-def encode_node(resid: int, chainid: int) -> float:
-    # MATLAB formatting: rid + cid/10 with one decimal
-    return float(resid) + float(chainid) / 10.0
+def encode_node(resid: float, chainid: float) -> float:
+    # MATLAB: encode = @(rid,cid) rid + cid/10;
+    return resid + chainid / 10.0
 
 
 def main():
-    # --- pick latest files
+    # --- pick latest files (MATLAB had fixed names; we extend to numbered versions) ---
     in_pathfile = _pick_latest(IN_PATH_BASE)
     in_coorfile = _pick_latest(IN_COOR_BASE)
     try:
@@ -87,42 +79,40 @@ def main():
     if in_atomfile:
         print(f"  atom_file  -> {in_atomfile}")
 
-    # --- load data
+    # ------------------------ Load data (MATLAB block) ------------------------
     seq = _load_path_first_row(in_pathfile)
     n = seq.size
+    assert n >= 2, "Path too short."
 
     coor = _load_coor_matrix(in_coorfile)
-    # coor: col1=resID, col6-8=CAxyz, col10=chainID  (MATLAB-style)
-    resID_list   = coor[:, 0].astype(int)
-    chainID_list = coor[:, 9].astype(int)
-    CAxyz        = coor[:, 5:8]
-
-    if in_atomfile:
-        _optional_load_atom(in_atomfile)
+    resID_list   = coor[:, 0]        # col1
+    chainID_list = coor[:, 9]        # col10
+    CAxyz        = coor[:, 5:8]      # col6-8
 
     # Decode nodes v = resID + chainID/10
-    resID_seq   = np.floor(seq + 1e-6).astype(int)
-    chainID_seq = np.round((seq - resID_seq) * 10).astype(int)
+    resID_seq   = np.floor(seq + 1e-6)
+    chainID_seq = np.round((seq - resID_seq) * 10)
 
-    # --- residues on selected chain (sorted unique)
+    # --- Residues on selected chain (SORTED) ---
     mask_chain = (chainID_seq == CHAIN_ID_SELECTED)
     res_on_chain = np.unique(resID_seq[mask_chain])
     Nchain = res_on_chain.size
-    if Nchain == 0:
-        raise ValueError(f"No residues from chain {CHAIN_ID_SELECTED} found in the selected path.")
+    assert Nchain > 0, f"No residues from chain {CHAIN_ID_SELECTED} found in the selected path."
 
-    # --- mapping (resID, chainID) -> row index in coor
-    keyCoor = resID_list.astype(np.int64) * 100 + chainID_list.astype(np.int64)
+    # --- Precompute step geometry & validity (CA distances) ---
+    keyCoor = (resID_list.astype(np.int64) * 100) + chainID_list.astype(np.int64)
+    # MATLAB: coorIdxMap maps key -> 1..numel(keyCoor)
+    # Python: map to 0..numel(keyCoor)-1 for direct indexing
     coorIdxMap = {int(k): int(i) for i, k in enumerate(keyCoor)}
 
-    # --- step geometry & validity across the path
     dist = np.zeros(n - 1, dtype=float)
     invalid = np.zeros(n - 1, dtype=bool)
-    for k in range(n - 1):
-        ra, ca = int(resID_seq[k]), int(chainID_seq[k])
-        rb, cb = int(resID_seq[k + 1]), int(chainID_seq[k + 1])
-        k1 = ra * 100 + ca
-        k2 = rb * 100 + cb
+
+    for k in range(n - 1):  # MATLAB k = 1:n-1
+        ra = resID_seq[k];   ca = chainID_seq[k]
+        rb = resID_seq[k+1]; cb = chainID_seq[k+1]
+        k1 = int(ra) * 100 + int(ca)
+        k2 = int(rb) * 100 + int(cb)
         if k1 not in coorIdxMap or k2 not in coorIdxMap:
             invalid[k] = True
             dist[k] = 0.0
@@ -131,198 +121,163 @@ def main():
             vb = CAxyz[coorIdxMap[k2], :]
             dist[k] = float(np.linalg.norm(vb - va))
 
-    # prefix sums S (distance) and C (invalid count)
-    S = np.empty(n, dtype=float)
-    S[0] = 0.0
+    # S = [0; cumsum(dist)], C = [0; cumsum(invalid)]
+    S = np.zeros(n, dtype=float)
+    C = np.zeros(n, dtype=int)
     if n > 1:
         S[1:] = np.cumsum(dist)
-    C = np.empty(n, dtype=int)
-    C[0] = 0
-    if n > 1:
         C[1:] = np.cumsum(invalid.astype(int))
     maxC = int(np.max(C))
 
-    # --- occurrence indices for each residue on the selected chain
+    # --- For each residue, indices where it occurs in the path ---
     occIdx = {}
     for rid in res_on_chain:
-        occ = np.where((resID_seq == rid) & (chainID_seq == CHAIN_ID_SELECTED))[0]
-        # Defensive clamp (shouldn't be needed but safe)
-        occ = occ[(occ >= 0) & (occ < n)]
-        occIdx[rid] = occ
+        rid_val = float(rid)
+        occ = np.where((resID_seq == rid_val) & (chainID_seq == CHAIN_ID_SELECTED))[0]
+        occIdx[float(rid_val)] = occ
 
-    # --- residues → 0..N-1 index
-    residues_chain = res_on_chain.copy()
-    N = residues_chain.size
-    resid2idx = {int(rid): i for i, rid in enumerate(residues_chain)}
+    # --- Fast shortest search for all ordered pairs (i != j) ---
+    res_on_chain = res_on_chain.reshape(1, -1).ravel()
+    N = res_on_chain.size
 
-    # --- containers for best segments (all ordered pairs)
+    bestI   = np.full((N, N), np.nan, dtype=float)
+    bestJ   = np.full((N, N), np.nan, dtype=float)
     bestD   = np.full((N, N), np.inf, dtype=float)
     bestLen = np.zeros((N, N), dtype=int)
-    bestI   = np.full((N, N), -1, dtype=int)   # path start index
-    bestJ   = np.full((N, N), -1, dtype=int)   # path end index
 
-    # Pre-allocated arrays reused for each start residue
     dBestForJ = np.full(n, np.inf, dtype=float)
-    iBestForJ = np.full(n, -1, dtype=int)
+    iBestForJ = np.full(n, np.nan, dtype=float)
     lenForJ   = np.zeros(n, dtype=int)
 
-    bestS_forC = np.full(maxC + 1, -np.inf, dtype=float)
-    bestI_forC = np.full(maxC + 1, -1, dtype=int)
+    bestS_forC = np.full(maxC + 1, -np.inf, dtype=float)  # index by C(t) (0..maxC)
+    bestI_forC = np.full(maxC + 1, np.nan, dtype=float)
 
-    # ================= core O(N * n) algorithm =================
-    for ai, sRID in enumerate(residues_chain):
-        sIdx = occIdx[sRID]
-        if sIdx.size == 0:
-            continue
+    for ai in range(N):  # MATLAB ai = 1:N
+        sRID = float(res_on_chain[ai])
+        sIdx = occIdx[sRID]  # sorted indices where sRID occurs
 
-        # reset per-j bests and C-level tables
+        # Reset per-j results
         dBestForJ[:] = np.inf
-        iBestForJ[:] = -1
+        iBestForJ[:] = np.nan
         lenForJ[:]   = 0
         bestS_forC[:] = -np.inf
-        bestI_forC[:] = -1
+        bestI_forC[:] = np.nan
 
-        p = 0  # pointer into sIdx
-        for t in range(n):
-            # 1) If t is a start occurrence of sRID, update "best start so far" for C-level
-            while p < sIdx.size and sIdx[p] == t:
-                c = int(C[t])  # 0..maxC
-                if c < 0 or c > maxC:
-                    p += 1
-                    continue
+        # Single sweep across the whole path
+        p = 0  # pointer into sIdx (0-based)
+        sIdx_len = sIdx.size
+
+        for t in range(n):  # MATLAB t = 1:n
+            # If t is an eligible start index for sRID, update tables at its C(t)
+            while p < sIdx_len and sIdx[p] == t:
+                c = int(C[t])   # NOTE: we use C(t) (0..maxC), not C(t)+1
                 s_val = S[t]
-                sb    = bestS_forC[c]
-                ib    = bestI_forC[c]
-                if (s_val > sb + TOL) or (abs(s_val - sb) <= TOL and (ib < 0 or t > ib)):
+                ib = bestI_forC[c]
+                sb = bestS_forC[c]
+                if (s_val > sb + TOL) or (abs(s_val - sb) <= TOL and (np.isnan(ib) or t > ib)):
                     bestS_forC[c] = s_val
-                    bestI_forC[c] = t
+                    bestI_forC[c] = float(t)
                 p += 1
 
-            # 2) If t can be an end (on selected chain), try best compatible start at same C(t)
-            if chainID_seq[t] != CHAIN_ID_SELECTED:
-                continue
-            c = int(C[t])
-            if c < 0 or c > maxC:
-                continue
-            ib = bestI_forC[c]
-            if ib < 0 or ib >= n:
-                continue
+            # If t can be an end (on selected chain), try best compatible start
+            if chainID_seq[t] == CHAIN_ID_SELECTED:
+                c = int(C[t])
+                ib = bestI_forC[c]
+                if not np.isnan(ib):
+                    ib_int = int(ib)
+                    d   = S[t] - bestS_forC[c]
+                    length = t - ib_int + 1
+                    if (d + TOL < dBestForJ[t]) or (abs(d - dBestForJ[t]) <= TOL and length < lenForJ[t]):
+                        dBestForJ[t] = d
+                        iBestForJ[t] = float(ib_int)
+                        lenForJ[t]   = length
 
-            # candidate segment [ib .. t]
-            d   = S[t] - bestS_forC[c]
-            ln  = t - ib + 1
-            # compare against per-position best for t (tie by shorter len)
-            if (d + TOL < dBestForJ[t]) or (abs(d - dBestForJ[t]) <= TOL and ln < lenForJ[t]):
-                dBestForJ[t] = d
-                iBestForJ[t] = ib
-                lenForJ[t]   = ln
-
-        # 3) Finalize best per end residue eRID for this start residue sRID
-        for bi, eRID in enumerate(residues_chain):
+        # For each end residue b, pick best among its j occurrences
+        for bi in range(N):
             if ai == bi:
                 continue
+            eRID = float(res_on_chain[bi])
             js = occIdx[eRID]
-            if js.size == 0:
-                continue
-
-            # clamp occurrence indices just in case
-            js = js[(js >= 0) & (js < n)]
             if js.size == 0:
                 continue
 
             dvals = dBestForJ[js]
             pos = int(np.argmin(dvals))
-            dmin = float(dvals[pos])
-            if not np.isfinite(dmin):
-                continue
+            dmin = dvals[pos]
+            if np.isfinite(dmin):
+                jStar = js[pos]
+                # tie by shortest len
+                ties = np.where(np.abs(dBestForJ[js] - dmin) <= TOL)[0]
+                if ties.size > 1:
+                    tie_js   = js[ties]
+                    tie_lens = lenForJ[tie_js]
+                    kmin = int(np.argmin(tie_lens))
+                    jStar = tie_js[kmin]
+                    dmin  = dBestForJ[jStar]
+                bestD[ai, bi]   = float(dmin)
+                bestI[ai, bi]   = float(iBestForJ[jStar])
+                bestJ[ai, bi]   = float(jStar)
+                bestLen[ai, bi] = int(lenForJ[jStar])
 
-            # tie-break on length
-            ties = np.where(np.abs(dvals - dmin) <= TOL)[0]
-            if ties.size > 1:
-                tie_js   = js[ties]
-                tie_lens = lenForJ[tie_js]
-                pos2 = int(np.argmin(tie_lens))
-                jStar = int(tie_js[pos2])
-            else:
-                jStar = int(js[pos])
-
-            if jStar < 0 or jStar >= n:
-                continue
-            ib = iBestForJ[jStar]
-            if ib < 0 or ib >= n:
-                continue
-
-            bestD[ai, bi]   = dmin
-            bestLen[ai, bi] = int(lenForJ[jStar])
-            bestI[ai, bi]   = ib
-            bestJ[ai, bi]   = jStar
-    # ===========================================================
-
-    # --- build output matrix M: rows = N*(N-1), columns = [start end dist nodes...]
+    # --- Build output matrix for paths: [start end distance nodes...] ---
     maxNodes = 0
     for a in range(N):
         for b in range(N):
             if a == b:
                 continue
-            ib = bestI[a, b]
-            jb = bestJ[a, b]
-            if ib < 0 or jb < 0 or ib >= n or jb >= n or ib > jb:
+            if np.isnan(bestI[a, b]) or np.isnan(bestJ[a, b]):
                 continue
+            ib = int(bestI[a, b])
+            jb = int(bestJ[a, b])
             maxNodes = max(maxNodes, jb - ib + 1)
-
-    if maxNodes == 0:
-        maxNodes = 1  # avoid zero-width arrays
 
     totalRows = N * (N - 1)
     M = np.zeros((totalRows, 3 + maxNodes), dtype=float)
     row = 0
+
     for a in range(N):
         for b in range(N):
             if a == b:
-                row += 1
                 continue
+            row += 1  # MATLAB 1-based row; Python row-1 index
+            startVal = encode_node(float(res_on_chain[a]), float(CHAIN_ID_SELECTED))
+            endVal   = encode_node(float(res_on_chain[b]), float(CHAIN_ID_SELECTED))
+            M[row-1, 0] = startVal
+            M[row-1, 1] = endVal
 
-            startVal = encode_node(int(residues_chain[a]), CHAIN_ID_SELECTED)
-            endVal   = encode_node(int(residues_chain[b]), CHAIN_ID_SELECTED)
-            M[row, 0] = startVal
-            M[row, 1] = endVal
-
-            ib = bestI[a, b]
-            jb = bestJ[a, b]
-            if ib < 0 or jb < 0 or ib >= n or jb >= n or ib > jb or not np.isfinite(bestD[a, b]):
-                M[row, 2] = np.inf
+            if np.isnan(bestI[a, b]) or np.isnan(bestJ[a, b]):
+                M[row-1, 2] = np.inf
             else:
+                ib = int(bestI[a, b])
+                jb = int(bestJ[a, b])
                 seg = seq[ib:jb+1]
-                M[row, 2] = bestD[a, b]
-                M[row, 3:3+seg.size] = seg
-            row += 1
+                M[row-1, 2] = bestD[a, b]
+                M[row-1, 3:3+seg.size] = seg
 
-    # sort rows by start then end ascending
+    # Sort rows by start then end
     order = np.lexsort((M[:, 1], M[:, 0]))
     M = M[order, :]
 
-    # --- write paths_file with 6-decimal distance (col 3), nodes 1 decimal
-    with open(PATHS_OUT, "w") as f:
+    # --- Write paths file with 6-decimal distance in column 3 ---
+    with open(PATHS_FILE, "w") as fid:
         for r in range(M.shape[0]):
             start_node = M[r, 0]
             end_node   = M[r, 1]
             dist_val   = M[r, 2]
-
-            f.write(f" {start_node:4.1f}\t{end_node:4.1f}\t")
+            fid.write(f" {start_node:4.1f}\t{end_node:4.1f}\t")
             if np.isfinite(dist_val):
-                f.write(f"{dist_val:.6f}")
+                fid.write(f"{dist_val:.6f}")
             else:
-                f.write("Inf")
-
+                fid.write("Inf")
             tail = M[r, 3:]
             nz = np.nonzero(tail != 0)[0]
             if nz.size > 0:
                 tail = tail[:nz[-1] + 1]
                 for v in tail:
-                    f.write(f"\t{v:4.1f}")
-            f.write("\n")
+                    fid.write(f"\t{v:4.1f}")
+            fid.write("\n")
 
-    # --- build symmetric “shortest of the pair” distance matrix for closeness
+    # --- Build symmetric "shortest of the pair" matrix for closeness ---
     start_nodes = M[:, 0]
     end_nodes   = M[:, 1]
     distances   = M[:, 2]
@@ -345,20 +300,23 @@ def main():
     np.fill_diagonal(distMat, 0.0)
     distMat = np.minimum(distMat, distMat.T)
 
-    # closeness centrality
+    # --- Closeness centrality ---
     closenessVals = np.zeros(Nres, dtype=float)
     for i in range(Nres):
         rowVals = distMat[i, :]
-        finiteVals = rowVals[np.isfinite(rowVals)]  # includes 0 on diagonal
+        finiteVals = rowVals[np.isfinite(rowVals)]
         s = float(np.sum(finiteVals))
-        closenessVals[i] = (Nres - 1) / s if s > 0 else 0.0
+        if s > 0:
+            closenessVals[i] = (Nres - 1) / s
+        else:
+            closenessVals[i] = 0.0
 
-    # --- write closeness file
-    with open(CLOSENESS_OUT, "w") as f:
+    # --- Save EXACT format: "  xx.x\t0.xxxxxx" ---
+    with open(CLOSENESS_FILE, "w") as fid:
         for i in range(Nres):
-            f.write(f" {residues[i]:4.1f}\t{closenessVals[i]:.6f}\n")
+            fid.write(f" {residues[i]:4.1f}\t{closenessVals[i]:.6f}\n")
 
-    print(f"Wrote {PATHS_OUT} (distances with 6 decimals) and {CLOSENESS_OUT} (closeness with 6 decimals).")
+    print(f'Wrote {PATHS_FILE} (distances with 6 decimals) and {CLOSENESS_FILE} (closeness with 6 decimals).')
 
 
 if __name__ == "__main__":
