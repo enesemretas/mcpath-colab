@@ -19,8 +19,9 @@ PATHS_OUT     = "shortest_paths_all_pairs_chain1"
 CLOSENESS_OUT = "closeness_float"
 
 CHAIN_ID_SELECTED = 1                       # set which chain to analyze (e.g., 1)
-TOL = 1e-9                                  # tie tolerance
+TOL = 1e-9                                   # tie tolerance
 # --------------------------------------------------------------------
+
 
 def _pick_latest(basename: str, directory: str = ".") -> str:
     """
@@ -42,6 +43,7 @@ def _pick_latest(basename: str, directory: str = ".") -> str:
         raise FileNotFoundError(f"No file found for base '{basename}' (including numbered variants).")
     return os.path.join(directory, best)
 
+
 def _load_path_first_row(pathfile: str) -> np.ndarray:
     # load full matrix (variable width), keep only first row, coerce non-finite to 0
     P = np.loadtxt(pathfile, delimiter="\t", ndmin=2)
@@ -55,11 +57,13 @@ def _load_path_first_row(pathfile: str) -> np.ndarray:
         raise ValueError("Path too short (need at least 2 nodes).")
     return seq
 
+
 def _load_coor_matrix(coorfile: str) -> np.ndarray:
     coor = np.loadtxt(coorfile)
     if coor.ndim != 2 or coor.shape[1] < 10:
         raise ValueError("coor_file must have at least 10 columns.")
     return coor
+
 
 def _optional_load_atom(atomfile: str):
     # Not used in the computation; we just confirm it exists/readable if present
@@ -68,9 +72,11 @@ def _optional_load_atom(atomfile: str):
     except Exception:
         print(f"⚠️  Could not read atom_file '{atomfile}'. Continuing.")
 
+
 def encode_node(resid: int, chainid: int) -> float:
-    # MATLAB-style: rid + cid/10 with one decimal
+    # MATLAB formatting: rid + cid/10 with one decimal
     return float(resid) + float(chainid) / 10.0
+
 
 def main():
     # --- pick latest files
@@ -81,7 +87,7 @@ def main():
     except FileNotFoundError:
         in_atomfile = None
 
-    print("Using files:")
+    print(f"Using files:")
     print(f"  path_file  -> {in_pathfile}")
     print(f"  coor_file  -> {in_coorfile}")
     if in_atomfile:
@@ -92,11 +98,10 @@ def main():
     n = seq.size
 
     coor = _load_coor_matrix(in_coorfile)
-    # Columns (MATLAB 1-based):
-    #   col1 = resID, col6-8 = CAxyz, col10 = chainID
+    # Columns: (MATLAB 1-based) col1=resID, col6-8=CAxyz, col10=chainID
     resID_list   = coor[:, 0].astype(int)
     chainID_list = coor[:, 9].astype(int)
-    CAxyz        = coor[:, 5:8]
+    CAxyz        = coor[:, 5:8]  # (x,y,z)
 
     if in_atomfile:
         _optional_load_atom(in_atomfile)
@@ -112,7 +117,6 @@ def main():
         raise ValueError(f"No residues from chain {CHAIN_ID_SELECTED} found in the selected path.")
 
     # --- build mapping from (resID, chainID) -> row index in coor
-    # key = resID*100 + chainID
     keyCoor = (resID_list.astype(np.int64) * 100 + chainID_list.astype(np.int64))
     coorIdxMap = {int(k): int(i) for i, k in enumerate(keyCoor)}
 
@@ -140,13 +144,13 @@ def main():
     for rid in res_on_chain:
         occIdx[rid] = np.where((resID_seq == rid) & (chainID_seq == CHAIN_ID_SELECTED))[0]
 
-    # --- defensive clamp: drop any occurrences outside [0, n-1] (should not happen, but keep it safe)
+    # --- Defensive clamp: drop any out-of-range indices just in case ---
     bad_total = 0
     for rid, idxs in list(occIdx.items()):
         ok = (idxs >= 0) & (idxs < n)
         if not np.all(ok):
-            dropped = np.count_nonzero(~ok)
-            bad_total += dropped
+            bad = np.count_nonzero(~ok)
+            bad_total += bad
             occIdx[rid] = idxs[ok]
     if bad_total:
         print(f"⚠️  Dropped {bad_total} out-of-range occurrence indices (defensive clamp).")
@@ -166,7 +170,7 @@ def main():
     bestI_forC = np.full(maxC + 1, np.nan)   # index of best start
 
     for ai, sRID in enumerate(res_on_chain):
-        sIdx = occIdx[sRID]   # sorted indices where sRID occurs
+        sIdx = occIdx[sRID]
 
         # reset per-j results
         dBestForJ[:] = np.inf
@@ -194,6 +198,8 @@ def main():
                 ib = bestI_forC[c]
                 if not np.isnan(ib):
                     ib_i = int(ib)
+                    if ib_i < 0 or ib_i >= n:
+                        continue  # extra safety
                     d   = S[t] - bestS_forC[c]
                     ln  = t - ib_i + 1
                     if (d + TOL < dBestForJ[t]) or (abs(d - dBestForJ[t]) <= TOL and ln < lenForJ[t]):
@@ -205,12 +211,11 @@ def main():
         for bi, eRID in enumerate(res_on_chain):
             if ai == bi:
                 continue
-
             js = occIdx[eRID]
             if js.size == 0:
                 continue
 
-            # defensive clamp again here
+            # Defensive clamp again here
             js = js[(js >= 0) & (js < n)]
             if js.size == 0:
                 continue
@@ -231,7 +236,7 @@ def main():
             else:
                 jStar = int(js[pos])
 
-            # final guard: jStar must be in [0, n-1]
+            # One more guard: jStar must be within [0, n-1]
             if jStar < 0 or jStar >= n:
                 continue
 
@@ -246,7 +251,11 @@ def main():
         for b in range(N):
             if a == b or math.isnan(bestI[a, b]) or math.isnan(bestJ[a, b]):
                 continue
-            maxNodes = max(maxNodes, int(bestJ[a, b] - bestI[a, b] + 1))
+            ib = int(bestI[a, b])
+            jb = int(bestJ[a, b])
+            if ib < 0 or jb < 0 or ib >= n or jb >= n or ib > jb:
+                continue
+            maxNodes = max(maxNodes, jb - ib + 1)
 
     totalRows = N * (N - 1)
     M = np.zeros((totalRows, 3 + maxNodes), dtype=float)
@@ -266,7 +275,7 @@ def main():
             else:
                 ib = int(bestI[a, b])
                 jb = int(bestJ[a, b])
-                if ib < 0 or jb >= n or jb < ib:
+                if ib < 0 or jb < 0 or ib >= n or jb >= n or ib > jb:
                     M[row, 2] = np.inf
                 else:
                     seg = seq[ib:jb+1]
@@ -336,6 +345,7 @@ def main():
             f.write(f" {residues[i]:4.1f}\t{closenessVals[i]:.6f}\n")
 
     print(f"Wrote {PATHS_OUT} (distances with 6 decimals) and {CLOSENESS_OUT} (closeness with 6 decimals).")
+
 
 if __name__ == "__main__":
     main()
