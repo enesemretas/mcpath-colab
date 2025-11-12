@@ -19,7 +19,7 @@ PATHS_OUT     = "shortest_paths_all_pairs_chain1"
 CLOSENESS_OUT = "closeness_float"
 
 CHAIN_ID_SELECTED = 1                       # set which chain to analyze (e.g., 1)
-TOL = 1e-9                                   # tie tolerance
+TOL = 1e-9                                  # tie tolerance
 # --------------------------------------------------------------------
 
 def _pick_latest(basename: str, directory: str = ".") -> str:
@@ -49,7 +49,7 @@ def _load_path_first_row(pathfile: str) -> np.ndarray:
         P = P.reshape(1, -1)
     P[~np.isfinite(P)] = 0.0
     seq = P[0, :]
-    # drop trailing zeros
+    # drop zeros
     seq = seq[seq != 0]
     if seq.size < 2:
         raise ValueError("Path too short (need at least 2 nodes).")
@@ -66,11 +66,10 @@ def _optional_load_atom(atomfile: str):
     try:
         _ = np.loadtxt(atomfile)
     except Exception:
-        # If it can't be read, just warn to console; not critical for outputs
         print(f"⚠️  Could not read atom_file '{atomfile}'. Continuing.")
 
 def encode_node(resid: int, chainid: int) -> float:
-    # MATLAB formatting: rid + cid/10 with one decimal
+    # MATLAB-style: rid + cid/10 with one decimal
     return float(resid) + float(chainid) / 10.0
 
 def main():
@@ -82,7 +81,7 @@ def main():
     except FileNotFoundError:
         in_atomfile = None
 
-    print(f"Using files:")
+    print("Using files:")
     print(f"  path_file  -> {in_pathfile}")
     print(f"  coor_file  -> {in_coorfile}")
     if in_atomfile:
@@ -93,10 +92,11 @@ def main():
     n = seq.size
 
     coor = _load_coor_matrix(in_coorfile)
-    # Columns: (MATLAB 1-based) col1=resID, col6-8=CAxyz, col10=chainID
+    # Columns (MATLAB 1-based):
+    #   col1 = resID, col6-8 = CAxyz, col10 = chainID
     resID_list   = coor[:, 0].astype(int)
     chainID_list = coor[:, 9].astype(int)
-    CAxyz        = coor[:, 5:8]  # (x,y,z)
+    CAxyz        = coor[:, 5:8]
 
     if in_atomfile:
         _optional_load_atom(in_atomfile)
@@ -112,7 +112,7 @@ def main():
         raise ValueError(f"No residues from chain {CHAIN_ID_SELECTED} found in the selected path.")
 
     # --- build mapping from (resID, chainID) -> row index in coor
-    # key = resID*100 + chainID  (matches MATLAB int64/100 trick)
+    # key = resID*100 + chainID
     keyCoor = (resID_list.astype(np.int64) * 100 + chainID_list.astype(np.int64))
     coorIdxMap = {int(k): int(i) for i, k in enumerate(keyCoor)}
 
@@ -139,6 +139,17 @@ def main():
     occIdx = {}
     for rid in res_on_chain:
         occIdx[rid] = np.where((resID_seq == rid) & (chainID_seq == CHAIN_ID_SELECTED))[0]
+
+    # --- defensive clamp: drop any occurrences outside [0, n-1] (should not happen, but keep it safe)
+    bad_total = 0
+    for rid, idxs in list(occIdx.items()):
+        ok = (idxs >= 0) & (idxs < n)
+        if not np.all(ok):
+            dropped = np.count_nonzero(~ok)
+            bad_total += dropped
+            occIdx[rid] = idxs[ok]
+    if bad_total:
+        print(f"⚠️  Dropped {bad_total} out-of-range occurrence indices (defensive clamp).")
 
     # --- fast shortest search for all ordered pairs (i != j)
     N = Nchain
@@ -194,7 +205,13 @@ def main():
         for bi, eRID in enumerate(res_on_chain):
             if ai == bi:
                 continue
+
             js = occIdx[eRID]
+            if js.size == 0:
+                continue
+
+            # defensive clamp again here
+            js = js[(js >= 0) & (js < n)]
             if js.size == 0:
                 continue
 
@@ -207,15 +224,18 @@ def main():
             # tie by shortest len
             ties = np.where(np.abs(dvals - dmin) <= TOL)[0]
             if ties.size > 1:
-                tie_js = js[ties]
+                tie_js   = js[ties]
                 tie_lens = lenForJ[tie_js]
                 pos2 = int(np.argmin(tie_lens))
                 jStar = int(tie_js[pos2])
-                dmin  = float(dBestForJ[jStar])
             else:
                 jStar = int(js[pos])
 
-            bestD[ai, bi]   = float(dmin)
+            # final guard: jStar must be in [0, n-1]
+            if jStar < 0 or jStar >= n:
+                continue
+
+            bestD[ai, bi]   = float(dBestForJ[jStar])
             bestI[ai, bi]   = float(int(iBestForJ[jStar]))
             bestJ[ai, bi]   = float(jStar)
             bestLen[ai, bi] = int(lenForJ[jStar])
@@ -246,14 +266,16 @@ def main():
             else:
                 ib = int(bestI[a, b])
                 jb = int(bestJ[a, b])
-                seg = seq[ib:jb+1]
-                M[row, 2] = bestD[a, b]
-                M[row, 3:3+seg.size] = seg
+                if ib < 0 or jb >= n or jb < ib:
+                    M[row, 2] = np.inf
+                else:
+                    seg = seq[ib:jb+1]
+                    M[row, 2] = bestD[a, b]
+                    M[row, 3:3+seg.size] = seg
             row += 1
 
     # sort rows by start then end ascending
-    # argsort by column 0 then column 1
-    order = np.lexsort((M[:,1], M[:,0]))
+    order = np.lexsort((M[:, 1], M[:, 0]))
     M = M[order, :]
 
     # --- write paths_file with 6-decimal distance (col 3), nodes 1 decimal
