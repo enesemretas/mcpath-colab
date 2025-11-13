@@ -6,9 +6,10 @@
 #   with delta = std(closeness_vals) on the selected chain.
 # - Creates a plot of residue labels ('1A', '2A', ...) vs closeness
 #   and a label file with lines like: '1A' , 0.014814
-# MODS:
-#   * Each valid step has unit cost (dist[k] = 1.0)
-#   * No min-symmetrization distMat = min(distMat, distMat.T)
+#
+# Key points:
+#   * Each valid step cost = Euclidean CA–CA distance
+#   * No symmetrization distMat = min(distMat, distMat.T)
 #   * Closeness uses k / sum(l_ij), where k = #reachable residues (excluding self)
 
 import os
@@ -169,7 +170,7 @@ def main():
     coor = _load_coor_matrix(in_coorfile)
     resID_list   = coor[:, 0]        # col1
     chainID_list = coor[:, 9]        # col10
-    CAxyz        = coor[:, 5:8]      # col6-8 (unused now, but kept for compatibility)
+    CAxyz        = coor[:, 5:8]      # col6-8
 
     # Decode nodes v = resID + chainID/10
     resID_seq   = np.floor(seq + 1e-6)
@@ -181,24 +182,28 @@ def main():
     Nchain = res_on_chain.size
     assert Nchain > 0, f"No residues from chain {CHAIN_ID_SELECTED} found in the selected path."
 
-    # --- Precompute step geometry & validity (UNIT STEP COST) ---
+    # --- Precompute step geometry & validity (EUCLIDEAN CA DISTANCE) ---
     keyCoor = (resID_list.astype(np.int64) * 100) + chainID_list.astype(np.int64)
     coorIdxMap = {int(k): int(i) for i, k in enumerate(keyCoor)}
 
     dist = np.zeros(n - 1, dtype=float)
     invalid = np.zeros(n - 1, dtype=bool)
 
-    for k in range(n - 1):  # MATLAB k = 1:n-1
+    for k in range(n - 1):
         ra = resID_seq[k];   ca = chainID_seq[k]
         rb = resID_seq[k+1]; cb = chainID_seq[k+1]
         k1 = int(ra) * 100 + int(ca)
         k2 = int(rb) * 100 + int(cb)
+
         if k1 not in coorIdxMap or k2 not in coorIdxMap:
             invalid[k] = True
             dist[k] = 0.0
         else:
-            # UNIT COST PER VALID STEP (instead of Euclidean CA distance)
-            dist[k] = 1.0
+            i1 = coorIdxMap[k1]
+            i2 = coorIdxMap[k2]
+            xyz1 = CAxyz[i1]
+            xyz2 = CAxyz[i2]
+            dist[k] = float(np.linalg.norm(xyz2 - xyz1))
 
     # S = [0; cumsum(dist)], C = [0; cumsum(invalid)]
     S = np.zeros(n, dtype=float)
@@ -382,7 +387,7 @@ def main():
     for i in range(Nres):
         rowVals = distMat[i, :]
         finite_mask = np.isfinite(rowVals)
-        # exclude self (diagonal, distance 0)
+        # exclude self (distance 0)
         finite_mask[i] = False
         k_reachable = int(np.count_nonzero(finite_mask))
         if k_reachable > 0:
