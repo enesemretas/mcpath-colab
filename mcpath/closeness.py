@@ -2,6 +2,7 @@
 # Direct translation of MATLAB "closeness" function
 # - Reads latest path_file[_N], coor_file[_N], atom_file[_N] in current dir
 # - Computes shortest_paths_all_pairs_chain1 and closeness_float
+# - EXTRA: finds peak residues of closeness centrality along the chain
 
 import os
 import re
@@ -14,6 +15,7 @@ IN_ATOM_BASE = "atom_file"      # optional, just reported
 
 PATHS_FILE      = "shortest_paths_all_pairs_chain1"
 CLOSENESS_FILE  = "closeness_float"
+PEAKS_FILE      = "closeness_peaks"   # NEW: output for peak residues
 CHAIN_ID_SELECTED = 1
 TOL = 1e-9
 # --------------------------------------------------------------------
@@ -316,7 +318,64 @@ def main():
         for i in range(Nres):
             fid.write(f" {residues[i]:4.1f}\t{closenessVals[i]:.6f}\n")
 
-    print(f'Wrote {PATHS_FILE} (distances with 6 decimals) and {CLOSENESS_FILE} (closeness with 6 decimals).')
+    # ----------------- NEW: Find peak residues of closeness -----------------
+    # Decode residues -> (resID, chainID)
+    res_int  = np.floor(residues + 1e-6).astype(int)
+    chain_id = np.round((residues - res_int) * 10).astype(int)
+
+    # Focus only on selected chain
+    mask_sel_chain = (chain_id == CHAIN_ID_SELECTED)
+    res_int_chain        = res_int[mask_sel_chain]
+    closeness_chain      = closenessVals[mask_sel_chain]
+    residues_chain_enc   = residues[mask_sel_chain]
+
+    # Sort along sequence (residue number)
+    order_chain = np.argsort(res_int_chain)
+    res_int_chain      = res_int_chain[order_chain]
+    closeness_chain    = closeness_chain[order_chain]
+    residues_chain_enc = residues_chain_enc[order_chain]
+
+    peaks_idx = []
+    L = len(res_int_chain)
+    if L > 0:
+        for i in range(L):
+            c = closeness_chain[i]
+            if L == 1:
+                # Only one residue on this chain: treat as peak
+                peaks_idx.append(i)
+            elif i == 0:
+                # First: compare to next
+                if c > closeness_chain[i+1] + TOL:
+                    peaks_idx.append(i)
+            elif i == L - 1:
+                # Last: compare to previous
+                if c > closeness_chain[i-1] + TOL:
+                    peaks_idx.append(i)
+            else:
+                # Interior: local maximum vs both neighbors
+                if (c > closeness_chain[i-1] + TOL) and (c > closeness_chain[i+1] + TOL):
+                    peaks_idx.append(i)
+
+    # Write peaks to file
+    with open(PEAKS_FILE, "w") as fid:
+        fid.write("# resID\tchainID\tencoded_node\tcloseness_peak\n")
+        for idx in peaks_idx:
+            fid.write(
+                f"{res_int_chain[idx]:4d}\t"
+                f"{CHAIN_ID_SELECTED:d}\t"
+                f"{residues_chain_enc[idx]:4.1f}\t"
+                f"{closeness_chain[idx]:.6f}\n"
+            )
+
+    print(f'Wrote {PATHS_FILE} (distances with 6 decimals), '
+          f'{CLOSENESS_FILE} (closeness with 6 decimals), '
+          f'and {PEAKS_FILE} (peak residues).')
+    if peaks_idx:
+        print("Peak residues (resID on chain", CHAIN_ID_SELECTED, "):")
+        for idx in peaks_idx:
+            print(f"  {res_int_chain[idx]}  -> closeness = {closeness_chain[idx]:.6f}")
+    else:
+        print("No local peaks in closeness found on the selected chain.")
 
 
 if __name__ == "__main__":
