@@ -19,6 +19,7 @@ import os
 import re
 import numpy as np
 import matplotlib.pyplot as plt
+from bisect import bisect_right
 
 # --------------------------- configuration ---------------------------
 IN_PATH_BASE = "path_file"      # tab-separated; first row = long path
@@ -166,8 +167,7 @@ def main():
     n = seq.size
     assert n >= 2, "Path too short."
 
-    # coor is not used for distances, only for info/sanity if needed
-    coor = _load_coor_matrix(in_coorfile)
+    _ = _load_coor_matrix(in_coorfile)  # only sanity
 
     # Decode nodes v = resID + chainID/10
     resID_seq   = np.floor(seq + 1e-6)
@@ -180,45 +180,36 @@ def main():
     assert N > 0, f"No residues from chain {CHAIN_ID_SELECTED} found in the selected path."
 
     # --- Build position lists pos[rid] = sorted indices where that residue appears in seq ---
-    pos = {}
-    for rid in res_on_chain:
-        rid_val = float(rid)
-        idx = np.where((resID_seq == rid_val) & (chainID_seq == CHAIN_ID_SELECTED))[0]
-        pos[rid] = np.sort(idx)
+    pos = {
+        rid: np.where((resID_seq == float(rid)) & (chainID_seq == CHAIN_ID_SELECTED))[0]
+        for rid in res_on_chain
+    }
 
     # --- Distance matrix L: minimal index difference along the path (q - p, q>p) ---
-    # Also store best start/end indices in seq for reconstructing the actual subpath.
     L = np.full((N, N), np.inf, dtype=float)
     start_idx = np.full((N, N), -1, dtype=int)
     end_idx   = np.full((N, N), -1, dtype=int)
 
-    # map residue -> index in matrix
-    rid_to_idx = {rid: i for i, rid in enumerate(res_on_chain)}
-
-    for a in range(N):
-        ra = res_on_chain[a]
-        posA = pos[ra]
-        if posA.size == 0:
+    for a, ra in enumerate(res_on_chain):
+        posa = pos[ra]
+        if posa.size == 0:
             continue
 
-        for b in range(N):
+        for b, rb in enumerate(res_on_chain):
             if a == b:
                 continue
-            rb = res_on_chain[b]
-            posB = pos[rb]
-            if posB.size == 0:
+            posb = pos[rb]
+            if posb.size == 0:
                 continue
 
             best_len = np.inf
             best_p = -1
             best_q = -1
 
-            # For each occurrence of ra, find first occurrence of rb to the right (q > p)
-            for p in posA:
-                # first index in posB with value > p
-                idxB = np.searchsorted(posB, p + 1)
-                if idxB < posB.size:
-                    q = posB[idxB]
+            for p in posa:
+                j = bisect_right(posb, p)
+                if j < posb.size:
+                    q = posb[j]
                     d = q - p
                     if d < best_len - TOL:
                         best_len = d
@@ -230,7 +221,6 @@ def main():
                 start_idx[a, b] = best_p
                 end_idx[a, b] = best_q
 
-    # set diagonal to zero
     np.fill_diagonal(L, 0.0)
 
     # --- Build PATHS_FILE: [start end distance nodes...] ---
@@ -294,23 +284,15 @@ def main():
                     fid.write(f"\t{v:4.1f}")
             fid.write("\n")
 
-    # --- Closeness centrality on this step-count distance matrix ---
-    # Here we interpret distances as directed (i -> j via q>p).
-    # Closeness: O_i = (N-1) / sum_{j != i} l_ij
+    # --- Closeness centrality: O_i = (N-1) / sum_{j != i} l_ij ---
     closenessVals = np.zeros(N, dtype=float)
     for i in range(N):
-        rowVals = L[i, :]
-        # exclude self
-        mask = np.isfinite(rowVals)
-        mask[i] = False
-        finiteVals = rowVals[mask]
-        if finiteVals.size > 0:
-            s = float(np.sum(finiteVals))
+        s = float(np.sum(L[i, :]) - L[i, i])  # exclude self
+        if s > 0:
             closenessVals[i] = (N - 1) / s
         else:
             closenessVals[i] = 0.0
 
-    # Encoded nodes (resID + chainID/10)
     residues_encoded = np.array(
         [encode_node(float(rid), float(CHAIN_ID_SELECTED)) for rid in res_on_chain],
         dtype=float
@@ -321,28 +303,26 @@ def main():
         for i in range(N):
             fid.write(f" {residues_encoded[i]:4.1f}\t{closenessVals[i]:.6f}\n")
 
+    print("Closeness min / max:", float(np.min(closenessVals)), float(np.max(closenessVals)))
+
     # ----------------- Peak residues via peakdet (on selected chain) -----------------
     res_int_chain   = res_on_chain.copy()
     closeness_chain = closenessVals.copy()
 
-    # peaks using std as delta
     peaks_idx = []
     if closeness_chain.size > 0:
         v = closeness_chain
         std_v = float(np.std(v))
         if std_v > 0:
             try:
-                maxtab, mintab = peakdet(v, std_v)
+                maxtab, _ = peakdet(v, std_v)
             except ValueError as e:
                 print("Peak detection warning:", e)
                 maxtab = np.empty((0, 2))
 
             if maxtab.size > 0:
                 peaks_idx = maxtab[:, 0].astype(int).tolist()
-        else:
-            maxtab = np.empty((0, 2))
 
-    # Write peaks file
     with open(PEAKS_FILE, "w") as fid:
         fid.write("# resID\tchainID\tencoded_node\tcloseness_peak\n")
         for idx in peaks_idx:
@@ -355,7 +335,6 @@ def main():
 
     # ----------------- Plot & label file for closeness on chain -----------------
     if res_int_chain.size > 0:
-        # chain letter (for "1A", "2A", ...)
         if 1 <= CHAIN_ID_SELECTED <= 26:
             chain_letter = chr(ord("A") + CHAIN_ID_SELECTED - 1)
         else:
@@ -368,12 +347,10 @@ def main():
             for lab, val in zip(labels, closeness_chain):
                 lf.write(f"'{lab}' , {val:.6f}\n")
 
-        # PLOT: all residues + peaks
         x = np.arange(len(res_int_chain))
 
         plt.figure(figsize=(12, 4))
         plt.plot(x, closeness_chain, marker="o", linestyle="-", label="Closeness")
-
         if peaks_idx:
             peak_x = np.array(peaks_idx, dtype=int)
             peak_y = closeness_chain[peak_x]
@@ -383,6 +360,7 @@ def main():
         plt.xlabel("Residue (number + chain)")
         plt.ylabel("Closeness centrality")
         plt.title(f"Closeness centrality along chain {chain_letter} (step-count metric)")
+        plt.ylim(0.0, 0.4)  # expected range for your data
         if peaks_idx:
             plt.legend()
         plt.tight_layout()
@@ -393,14 +371,7 @@ def main():
     else:
         print("No residues on selected chain for plotting / label export.")
 
-    print(f'Wrote {PATHS_FILE}, {CLOSENESS_FILE}, {PEAKS_FILE} (peaks), and {LABELS_FILE}.')
-
-    if peaks_idx:
-        print("Peak residues (resID on chain", CHAIN_ID_SELECTED, "):")
-        for idx in peaks_idx:
-            print(f"  {res_int_chain[idx]}  -> closeness = {closeness_chain[idx]:.6f}")
-    else:
-        print("No peaks found on the selected chain with delta = std(closeness).")
+    print(f"Wrote {PATHS_FILE}, {CLOSENESS_FILE}, {PEAKS_FILE}, and {LABELS_FILE}.")
 
 
 if __name__ == "__main__":
