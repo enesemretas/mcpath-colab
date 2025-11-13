@@ -2,7 +2,8 @@
 # Direct translation of MATLAB "closeness" function
 # - Reads latest path_file[_N], coor_file[_N], atom_file[_N] in current dir
 # - Computes shortest_paths_all_pairs_chain1 and closeness_float
-# - EXTRA: finds peak residues of closeness centrality along the chain
+# - Uses a MATLAB-like PEAKDET algorithm to find peaks in closeness
+#   with delta = std(closeness_vals) on the selected chain.
 
 import os
 import re
@@ -15,7 +16,8 @@ IN_ATOM_BASE = "atom_file"      # optional, just reported
 
 PATHS_FILE      = "shortest_paths_all_pairs_chain1"
 CLOSENESS_FILE  = "closeness_float"
-PEAKS_FILE      = "closeness_peaks"   # NEW: output for peak residues
+PEAKS_FILE      = "closeness_peaks"   # output for peak residues
+
 CHAIN_ID_SELECTED = 1
 TOL = 1e-9
 # --------------------------------------------------------------------
@@ -66,6 +68,75 @@ def encode_node(resid: float, chainid: float) -> float:
     return resid + chainid / 10.0
 
 
+# ------------------- MATLAB-like PEAKDET implementation -------------------
+def peakdet(v, delta):
+    """
+    Python version of the MATLAB 'peakdet' function by Eli Billauer.
+
+    v: 1D array-like of values
+    delta: positive scalar threshold
+    Returns:
+      maxtab: array([[idx_max, value_max], ...])
+      mintab: array([[idx_min, value_min], ...])
+    where idx_* are indices (0-based, like Python).
+    """
+    v = np.asarray(v, dtype=float).flatten()
+    if v.size == 0:
+        return np.empty((0, 2)), np.empty((0, 2))
+
+    if np.ndim(delta) != 0:
+        raise ValueError("Input argument DELTA must be a scalar")
+    if delta <= 0:
+        raise ValueError("Input argument DELTA must be positive")
+
+    maxtab = []
+    mintab = []
+
+    mn = np.inf
+    mx = -np.inf
+    mnpos = np.nan
+    mxpos = np.nan
+
+    lookformax = True
+
+    for i in range(len(v)):
+        this = v[i]
+        if this > mx:
+            mx = this
+            mxpos = i
+        if this < mn:
+            mn = this
+            mnpos = i
+
+        if lookformax:
+            if this < mx - delta:
+                # maximum peak found
+                maxtab.append((mxpos, mx))
+                mn = this
+                mnpos = i
+                lookformax = False
+        else:
+            if this > mn + delta:
+                # minimum peak found
+                mintab.append((mnpos, mn))
+                mx = this
+                mxpos = i
+                lookformax = True
+
+    if len(maxtab) == 0:
+        maxtab_arr = np.empty((0, 2))
+    else:
+        maxtab_arr = np.asarray(maxtab, dtype=float)
+
+    if len(mintab) == 0:
+        mintab_arr = np.empty((0, 2))
+    else:
+        mintab_arr = np.asarray(mintab, dtype=float)
+
+    return maxtab_arr, mintab_arr
+# -------------------------------------------------------------------------
+
+
 def main():
     # --- pick latest files (MATLAB had fixed names; we extend to numbered versions) ---
     in_pathfile = _pick_latest(IN_PATH_BASE)
@@ -103,8 +174,6 @@ def main():
 
     # --- Precompute step geometry & validity (CA distances) ---
     keyCoor = (resID_list.astype(np.int64) * 100) + chainID_list.astype(np.int64)
-    # MATLAB: coorIdxMap maps key -> 1..numel(keyCoor)
-    # Python: map to 0..numel(keyCoor)-1 for direct indexing
     coorIdxMap = {int(k): int(i) for i, k in enumerate(keyCoor)}
 
     dist = np.zeros(n - 1, dtype=float)
@@ -318,7 +387,7 @@ def main():
         for i in range(Nres):
             fid.write(f" {residues[i]:4.1f}\t{closenessVals[i]:.6f}\n")
 
-    # ----------------- NEW: Find peak residues of closeness -----------------
+    # ----------------- NEW: Find peak residues via peakdet -----------------
     # Decode residues -> (resID, chainID)
     res_int  = np.floor(residues + 1e-6).astype(int)
     chain_id = np.round((residues - res_int) * 10).astype(int)
@@ -336,25 +405,24 @@ def main():
     residues_chain_enc = residues_chain_enc[order_chain]
 
     peaks_idx = []
-    L = len(res_int_chain)
-    if L > 0:
-        for i in range(L):
-            c = closeness_chain[i]
-            if L == 1:
-                # Only one residue on this chain: treat as peak
-                peaks_idx.append(i)
-            elif i == 0:
-                # First: compare to next
-                if c > closeness_chain[i+1] + TOL:
-                    peaks_idx.append(i)
-            elif i == L - 1:
-                # Last: compare to previous
-                if c > closeness_chain[i-1] + TOL:
-                    peaks_idx.append(i)
-            else:
-                # Interior: local maximum vs both neighbors
-                if (c > closeness_chain[i-1] + TOL) and (c > closeness_chain[i+1] + TOL):
-                    peaks_idx.append(i)
+
+    if res_int_chain.size > 0:
+        v = closeness_chain
+        std_v = float(np.std(v))
+        if std_v > 0:
+            delta = std_v  # <-- PEAK DELTA = STANDARD DEVIATION
+            try:
+                maxtab, mintab = peakdet(v, delta)
+            except ValueError as e:
+                print("Peak detection warning:", e)
+                maxtab = np.empty((0, 2))
+
+            if maxtab.size > 0:
+                # maxtab[:,0] are indices (0-based)
+                peaks_idx = maxtab[:, 0].astype(int).tolist()
+        else:
+            # zero variance -> flat signal, no peaks
+            maxtab = np.empty((0, 2))
 
     # Write peaks to file
     with open(PEAKS_FILE, "w") as fid:
@@ -369,13 +437,14 @@ def main():
 
     print(f'Wrote {PATHS_FILE} (distances with 6 decimals), '
           f'{CLOSENESS_FILE} (closeness with 6 decimals), '
-          f'and {PEAKS_FILE} (peak residues).')
+          f'{PEAKS_FILE} (peak residues via peakdet, delta = std(closeness)).')
+
     if peaks_idx:
         print("Peak residues (resID on chain", CHAIN_ID_SELECTED, "):")
         for idx in peaks_idx:
             print(f"  {res_int_chain[idx]}  -> closeness = {closeness_chain[idx]:.6f}")
     else:
-        print("No local peaks in closeness found on the selected chain.")
+        print("No peaks found on the selected chain using peakdet with delta = std(closeness).")
 
 
 if __name__ == "__main__":
