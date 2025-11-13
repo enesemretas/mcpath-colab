@@ -1,216 +1,251 @@
-# Infinite path generator — Python/NumPy version (Colab-ready)
-# Save this cell and run. Then call:
-#   path = infinite("4CFR", path_length=500_000, pottype='1')
-#
-# Files expected in the working dir:
-#   <ProteinName>.cor
-#   <ProteinName>_<tip>.out  where tip from pottype:
-#       '1' -> _atomistic, '2' -> _BJ, '3' -> _TD, '4' -> _dist, '5' -> _markov
-#
-# Output written:
-#   <ProteinName>_<tip>_<steps>steps_infinite.path   (tab-delimited)
+# infinite.py
+# Python translation of MATLAB "infinite" function
+# (single long path; same logic as the original code)
 
 import os
 import numpy as np
 
-def infinite(ProteinName: str, path_length: int, pottype: str = '1'):
+
+def infinite(ProteinName: str, path_length: int, pottype: str = "1"):
     """
-    Generate a single long residue path using the normalized transition
-    matrix in <ProteinName>_<tip>.out and residue info from <ProteinName>.cor.
+    Generate a long residue path using the normalized matrix in
+    <ProteinName><Type>.out and coordinates in <ProteinName>.cor
 
     Parameters
     ----------
     ProteinName : str
-        Base name of files (no extension).
+        Base name of the files (no extension).
     path_length : int
-        Number of steps to generate (e.g., 500_000).
+        Number of steps to generate (MATLAB: pathlength).
     pottype : {'1','2','3','4','5'}
-        1='atomistic', 2='BJ', 3='TD', 4='dist', 5='markov'
+        1='atomistic', 2='BJ', 3='TD', 4='dist', 5='markov'.
 
     Returns
     -------
-    path : np.ndarray (shape: 1 x path_length)
+    path : np.ndarray, shape (1, L)
         Encoded path values: resID + chainID/10
     """
 
-    # --- map pottype to suffixes (kept identical to your MATLAB)
-    tip_map = {
-        '1': ('_atomistic', 'atomistic'),
-        '2': ('_BJ',        'BJ'),
-        '3': ('_TD',        'TD'),
-        '4': ('_dist',      'dist'),
-        '5': ('_markov',    'markov'),
+    # ----- map pottype -> Type suffix (as in MATLAB) -----
+    type_map = {
+        "1": "_atomistic",
+        "2": "_BJ",
+        "3": "_TD",
+        "4": "_dist",
+        "5": "_markov",
     }
-    if pottype not in tip_map:
+    if pottype not in type_map:
         raise ValueError("pottype must be one of '1','2','3','4','5'")
+    Type = type_map[pottype]
 
-    Type, tip = tip_map[pottype]
-
-    # --- load inputs
+    # ----- load inputs -----
     cor_file = f"{ProteinName}.cor"
     out_file = f"{ProteinName}{Type}.out"
 
     if not os.path.isfile(cor_file):
-        raise FileNotFoundError(f"Missing {cor_file}")
+        raise FileNotFoundError(cor_file)
     if not os.path.isfile(out_file):
-        raise FileNotFoundError(f"Missing {out_file}")
+        raise FileNotFoundError(out_file)
 
-    # coor: numeric matrix; uses columns 1 and 10 in MATLAB (-> 0 and 9 in Python)
+    # coor: same usage as MATLAB: col1=resID, col10=chainID
     coor = np.loadtxt(cor_file)
-    # normalized: probability/weight matrix (resno x resno)
     normalized = np.loadtxt(out_file)
 
-    # --- defaults replicated
-    baslangic  = 1   # residue ID (as in coor column 1 in MATLAB)
-    baslangic1 = 1   # chain ID number (as in coor column 10 in MATLAB)
+    # MATLAB defaults:
+    baslangic = 1    # residue number (unused for start in MATLAB infinite)
+    baslangic1 = 1   # chain number
     pathlength = int(path_length)
 
+    # size of probability matrix
     resno = normalized.shape[0]
-    assert normalized.shape[1] == resno, "normalized must be square"
+    assert normalized.shape == (resno, resno)
 
-    # --- find the initial row index (MATLAB set 'initial' but then used startres=1;
-    #     here we prefer to actually start from the found index if it exists)
-    initial = None
-    # In MATLAB: coor(i,10)==baslangic1 && coor(i,1)==baslangic
-    # Python (0-based): coor[i, 9] and coor[i, 0].
-    for i in range(resno):
-        if int(coor[i, 9]) == int(baslangic1) and int(coor[i, 0]) == int(baslangic):
-            initial = i
-            break
-    if initial is None:
-        # fallback to first row if not found (MATLAB effectively started at 1 anyway)
-        initial = 0
-
-    # --- build newmtrx like MATLAB (size: (resno+1) x (resno+1), first row/col are headers 0..resno-1)
+    # ----- build newmtrx (resno+1 x resno+1) with header row/col -----
+    # MATLAB:
+    # for i=1:resno+1
+    #   newmtrx(1,i)=i-1;
+    #   newmtrx(i,1)=i-1;
+    # end
     newmtrx = np.zeros((resno + 1, resno + 1), dtype=float)
-    header = np.arange(0, resno, dtype=float)
-    newmtrx[0, 1:] = header
-    newmtrx[1:, 0] = header
-    newmtrx[1:, 1:] = np.array(normalized, dtype=float)
+    for i in range(resno + 1):
+        newmtrx[0, i] = i  # 0..resno
+        newmtrx[i, 0] = i
+    # newmtrx(i+1,j+1)=normalized(i,j)
+    newmtrx[1:, 1:] = normalized
 
-    upper = 1.0  # used as an upper threshold in selection
-    # Note: cap matrix is written in MATLAB but never used later; we keep structure.
+    upper = 1.0
+    lower = 0.0
+
+    # cap matrix (not used later, but we keep it for completeness)
     cap = np.ones((resno, resno), dtype=float)
 
-    # --- NEW MATRIX GENERATION (row normalization / thresholding) ---
-    # MATLAB loops by row (i=2..resno+1); 'sum' is re-used per row
-    if pottype == '1':
-        # atomistic branch
-        for i in range(1, resno + 1):
-            row_sum = np.sum(newmtrx[i, 1:])
-            if row_sum <= 0:
-                # avoid divide-by-zero (if an all-zero row)
-                continue
-            newmtrx[i, 1:] = newmtrx[i, 1:] / row_sum
-            # set diagonal to 1 temporarily
-            newmtrx[i, i] = 1.0
+    # ----- NEW MATRIX GENERATION -----
+    # We follow the MATLAB loops explicitly.
 
-            # zero out minimum entry in the row and diagonal
+    if int(pottype) == 1:
+        # atomistic
+        for i in range(1, resno + 1):  # MATLAB: i=2:resno+1
+            # sum over columns 2..resno+1
+            row_sum = 0.0
+            for j in range(1, resno + 1):
+                row_sum += newmtrx[i, j]
+
+            if row_sum == 0:
+                continue
+
+            # first normalization + diagonal = 1
+            for j in range(1, resno + 1):
+                newmtrx[i, j] = newmtrx[i, j] / row_sum
+                if i == j:
+                    newmtrx[i, j] = 1.0
+
+            # find minimum over whole row (including col 0)
             row_min = np.min(newmtrx[i, :])
-            # minimum among all entries, MATLAB uses entire row; keep same
-            newmtrx[i, newmtrx[i, :] == row_min] = 0.0
-            newmtrx[i, i] = 0.0
 
-            # renormalize after zeroing
-            row_sum = np.sum(newmtrx[i, 1:])
-            if row_sum > 0:
-                newmtrx[i, 1:] = newmtrx[i, 1:] / row_sum
-                newmtrx[i, i] = 0.0
-        lower = 0.0
-    else:
-        # BJ / TD / dist / markov branch
-        for i in range(1, resno + 1):
-            row_sum = np.sum(newmtrx[i, 1:])
-            if row_sum <= 0:
+            # zero minimum and diagonal
+            for j in range(1, resno + 1):
+                if newmtrx[i, j] == row_min:
+                    newmtrx[i, j] = 0.0
+                if i == j:
+                    newmtrx[i, j] = 0.0
+
+            # renormalize (excluding col 0)
+            row_sum = 0.0
+            for j in range(1, resno + 1):
+                row_sum += newmtrx[i, j]
+
+            if row_sum == 0:
                 continue
+
+            for j in range(1, resno + 1):
+                newmtrx[i, j] = newmtrx[i, j] / row_sum
+                if i == j:
+                    newmtrx[i, j] = 0.0
+
+    else:
+        # BJ / TD / dist / markov
+        for i in range(1, resno + 1):
+            # original sum (unnormalized) over j=2..resno+1
+            row_sum = 0.0
+            for j in range(1, resno + 1):
+                row_sum += newmtrx[i, j]
+
+            if row_sum == 0:
+                continue
+
             average = row_sum / resno
 
-            newmtrx[i, 1:] = newmtrx[i, 1:] / row_sum
-            newmtrx[i, i] = 1.0
+            # normalize, set diagonal=1
+            for j in range(1, resno + 1):
+                newmtrx[i, j] = newmtrx[i, j] / row_sum
+                if i == j:
+                    newmtrx[i, j] = 1.0
 
-            # threshold: values below average -> 0; diagonal -> 0
-            below = newmtrx[i, :] < average
-            newmtrx[i, below] = 0.0
-            newmtrx[i, i] = 0.0
+            # threshold by average (note: average from *pre*-normalization)
+            for j in range(1, resno + 1):
+                if newmtrx[i, j] < average:
+                    newmtrx[i, j] = 0.0
+                if i == j:
+                    newmtrx[i, j] = 0.0
 
-            # renormalize to sum=1 (excluding col 0 header)
-            row_sum = np.sum(newmtrx[i, 1:])
-            if row_sum > 0:
-                newmtrx[i, 1:] = newmtrx[i, 1:] / row_sum
-                newmtrx[i, i] = 0.0
+            # renormalize and fill cap
+            row_sum = 0.0
+            for j in range(1, resno + 1):
+                row_sum += newmtrx[i, j]
 
-            # (cap filling was used to store non-zeros; not used later)
-            nz = newmtrx[i, 1:] > 0
-            nz_vals = newmtrx[i, 1:][nz]
-            count = nz_vals.size
-            if count > 0:
-                cap[i - 1, :count] = nz_vals
-        lower = 0.0
+            if row_sum == 0:
+                continue
 
-    # --- PATH GENERATION (single path, like the MATLAB script effectively does) ---
-    rng = np.random.default_rng()  # modern RNG
+            counter = 0
+            for j in range(1, resno + 1):
+                newmtrx[i, j] = newmtrx[i, j] / row_sum
+                if i == j:
+                    newmtrx[i, j] = 0.0
+                if newmtrx[i, j] != 0:
+                    counter += 1
+                    cap[i - 1, counter - 1] = newmtrx[i, j]
+
+    # ----- PATH GENERATION -----
+    # MATLAB:
+    # startres=1; runs=runs+1; newmtrx=permtrx; counter=1; sequence(counter,runs)=startres; ...
+
+    startres = 1  # 1-based residue index
     taban = max(1, pathlength // 10)
+    rng = np.random.default_rng()
 
-    # MATLAB started with 'startres=1' (1-based). We use 'initial' found above (0-based).
-    startres = int(initial)  # index in [0..resno-1]
-
-    sequence = np.zeros((pathlength,), dtype=int)
+    sequence = np.zeros(pathlength, dtype=int)   # 1-based residue indices
     path = np.zeros((1, pathlength), dtype=float)
 
-    # step 1
-    sequence[0] = startres
-    # encode resID + chainID/10  (MATLAB: coor(row,1)+coor(row,10)/10)
-    path[0, 0] = float(coor[startres, 0]) + float(coor[startres, 9]) / 10.0
+    # first step
+    counter = 1
+    sequence[counter - 1] = startres
+    row0 = startres - 1  # convert to 0-based index into coor
+    path[0, counter - 1] = float(coor[row0, 0]) + float(coor[row0, 9]) / 10.0
 
-    for step in range(1, pathlength):
-        # Collect neighbors from row (startres+1) and cols 2..resno+1
-        probs = newmtrx[startres + 1, 1:].copy()
-        # zero diagonal and any values outside (lower, upper)
-        probs[startres] = 0.0
-        mask = (probs > lower) & (probs < upper)
-        candidates = np.nonzero(mask)[0]  # indices 0..resno-1
-        if candidates.size == 0:
-            # If we hit a dead-end row, fallback to uniform among non-diagonal indices
-            candidates = np.delete(np.arange(resno), startres)
-            probs = np.ones_like(candidates, dtype=float) / max(1, candidates.size)
-            next_idx = int(rng.choice(candidates, p=probs))
+    while counter != pathlength:
+        counter += 1
+
+        # --- build P (indices & probabilities) ---
+        # MATLAB:
+        # j=0; P=0; for i=2:resno+1, if newmtrx(startres+1,i)>lower && <upper ...
+        j = 0
+        P_idx = []
+        P_prob = []
+
+        row_idx = startres  # since MATLAB row = startres+1 (1-based) => index 'startres'
+        for col in range(1, resno + 1):  # 1..resno corresponds to col 2..resno+1
+            val = newmtrx[row_idx, col]
+            if (val > lower) and (val < upper):
+                j += 1
+                P_idx.append(int(newmtrx[0, col]))   # header = residue index
+                P_prob.append(float(val))
+
+        if j == 0:
+            # MATLAB behavior: no update to startres; path stays at same residue
+            sequence[counter - 1] = startres
         else:
-            p_raw = probs[candidates]
-            s = p_raw.sum()
+            P_prob = np.array(P_prob, dtype=float)
+            # Q(2,i) = P(2,i) / sum; cumulative in gen(2,i)
+            s = P_prob.sum()
             if s <= 0:
-                # safeguard: uniform among candidates
-                p = np.ones_like(candidates, dtype=float) / candidates.size
+                # should not happen; fall back to uniform among P_idx
+                q = np.ones(j, dtype=float) / j
             else:
-                p = p_raw / s
-            next_idx = int(rng.choice(candidates, p=p))
+                q = P_prob / s
 
-        startres = next_idx
-        sequence[step] = startres
-        path[0, step] = float(coor[startres, 0]) + float(coor[startres, 9]) / 10.0
+            cdf = np.cumsum(q)
+            r = rng.random()
+            k = int(np.searchsorted(cdf, r, side="right"))
+            if k >= j:
+                k = j - 1
+            startres = int(P_idx[k])     # 1-based residue index
 
-        if (step + 1) % taban == 0:
-            print(f"Number of steps generated so far: {step + 1}")
+            sequence[counter - 1] = startres
 
-    # --- Trim trailing all-zero columns (mirror of MATLAB's end-trim pass)
-    # (Here we always generate exactly 'pathlength' steps; kept for parity.)
-    # If any trailing zeros exist (shouldn't unless pathlength==0), drop them.
-    last_nonzero = np.max(np.nonzero(np.abs(path[0]) > 0)) if np.any(path) else -1
-    if last_nonzero >= 0:
-        path = path[:, :last_nonzero + 1]
+        # append encoded residue to path
+        row0 = startres - 1
+        path[0, counter - 1] = float(coor[row0, 0]) + float(coor[row0, 9]) / 10.0
 
-    # --- Write .path (tab-delimited)
+        if counter % taban == 0:
+            print(f"Number of steps generated so far: {counter}")
+
+    # ----- trim trailing zero columns (mirrors MATLAB, mostly no-op here) -----
+    # MATLAB does a check for max(abs(path(:,pl+1-i)))~=0; here path has exactly
+    # 'pathlength' entries, all filled, so we just keep them.
+
     pl = path.shape[1]
+
+    # ----- write .path file -----
     out_name = f"{ProteinName}{Type}_{pl}steps_infinite.path"
     np.savetxt(out_name, path, fmt="%.10g", delimiter="\t")
     print(f"Saved path to: {out_name}")
 
-    # --- stats (same idea as MATLAB block)
+    # ----- stats block (same idea as MATLAB; optional) -----
     coor_enc = coor[:, 0] + coor[:, 9] / 10.0
     stats = np.column_stack([coor_enc, np.zeros_like(coor_enc)])
-    # count visits for first (and only) path row
     for val in path[0, :]:
         hits = np.where(np.isclose(stats[:, 0], val, atol=1e-12))[0]
-        if hits.size:
+        if hits.size > 0:
             stats[hits[0], 1] += 1
 
     return path
