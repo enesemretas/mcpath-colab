@@ -4,10 +4,13 @@
 # - Computes shortest_paths_all_pairs_chain1 and closeness_float
 # - Uses a MATLAB-like PEAKDET algorithm to find peaks in closeness
 #   with delta = std(closeness_vals) on the selected chain.
+# - Creates a plot of residue labels ('1A', '2A', ...) vs closeness
+#   and a label file with lines like: '1A' , 0.014814
 
 import os
 import re
 import numpy as np
+import matplotlib.pyplot as plt
 
 # --------------------------- configuration ---------------------------
 IN_PATH_BASE = "path_file"      # tab-separated; first row = long path
@@ -16,7 +19,9 @@ IN_ATOM_BASE = "atom_file"      # optional, just reported
 
 PATHS_FILE      = "shortest_paths_all_pairs_chain1"
 CLOSENESS_FILE  = "closeness_float"
-PEAKS_FILE      = "closeness_peaks"   # output for peak residues
+PEAKS_FILE      = "closeness_peaks"            # output for peak residues
+PLOT_FILE       = "closeness_chain_plot.png"   # plot for selected chain
+LABELS_FILE     = "closeness_chain_labels.txt" # '1A' , 0.014814 style
 
 CHAIN_ID_SELECTED = 1
 TOL = 1e-9
@@ -387,7 +392,7 @@ def main():
         for i in range(Nres):
             fid.write(f" {residues[i]:4.1f}\t{closenessVals[i]:.6f}\n")
 
-    # ----------------- NEW: Find peak residues via peakdet -----------------
+    # ----------------- Find peak residues via peakdet -----------------
     # Decode residues -> (resID, chainID)
     res_int  = np.floor(residues + 1e-6).astype(int)
     chain_id = np.round((residues - res_int) * 10).astype(int)
@@ -410,7 +415,7 @@ def main():
         v = closeness_chain
         std_v = float(np.std(v))
         if std_v > 0:
-            delta = std_v  # <-- PEAK DELTA = STANDARD DEVIATION
+            delta = std_v  # PEAK DELTA = STANDARD DEVIATION
             try:
                 maxtab, mintab = peakdet(v, delta)
             except ValueError as e:
@@ -434,6 +439,48 @@ def main():
                 f"{residues_chain_enc[idx]:4.1f}\t"
                 f"{closeness_chain[idx]:.6f}\n"
             )
+
+    # ----------------- Plot & label file for closeness on chain -----------------
+    if res_int_chain.size > 0:
+        # Map numeric chain ID to letter if possible
+        if 1 <= CHAIN_ID_SELECTED <= 26:
+            chain_letter = chr(ord("A") + CHAIN_ID_SELECTED - 1)
+        else:
+            chain_letter = str(CHAIN_ID_SELECTED)
+
+        labels = [f"{rid}{chain_letter}" for rid in res_int_chain]
+
+        # Text file: '1A' , 0.014814
+        with open(LABELS_FILE, "w") as lf:
+            for lab, val in zip(labels, closeness_chain):
+                lf.write(f"'{lab}' , {val:.6f}\n")
+
+        # PLOT: all residues + peaks
+        x = np.arange(len(res_int_chain))
+
+        plt.figure(figsize=(12, 4))
+        # full profile
+        plt.plot(x, closeness_chain, marker="o", linestyle="-", label="Closeness")
+
+        # overlay peaks if any
+        if peaks_idx:
+            peak_x = np.array(peaks_idx, dtype=int)
+            peak_y = closeness_chain[peak_x]
+            plt.scatter(peak_x, peak_y, s=50, marker="s", label="Peaks")  # larger markers
+
+        plt.xticks(x, labels, rotation=90, fontsize=6)
+        plt.xlabel("Residue (number + chain)")
+        plt.ylabel("Closeness centrality")
+        plt.title(f"Closeness centrality along chain {chain_letter}")
+        if peaks_idx:
+            plt.legend()
+        plt.tight_layout()
+        plt.savefig(PLOT_FILE, dpi=300)
+        plt.close()
+
+        print(f"Saved closeness plot to '{PLOT_FILE}' and labels to '{LABELS_FILE}'.")
+    else:
+        print("No residues on selected chain for plotting / label export.")
 
     print(f'Wrote {PATHS_FILE} (distances with 6 decimals), '
           f'{CLOSENESS_FILE} (closeness with 6 decimals), '
