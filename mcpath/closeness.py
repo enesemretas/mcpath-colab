@@ -1,11 +1,15 @@
 # closeness.py
-# Direct translation of MATLAB "closeness" function
+# Direct translation of MATLAB "closeness" function (modified)
 # - Reads latest path_file[_N], coor_file[_N], atom_file[_N] in current dir
 # - Computes shortest_paths_all_pairs_chain1 and closeness_float
 # - Uses a MATLAB-like PEAKDET algorithm to find peaks in closeness
 #   with delta = std(closeness_vals) on the selected chain.
 # - Creates a plot of residue labels ('1A', '2A', ...) vs closeness
 #   and a label file with lines like: '1A' , 0.014814
+# MODS:
+#   * Each valid step has unit cost (dist[k] = 1.0)
+#   * No min-symmetrization distMat = min(distMat, distMat.T)
+#   * Closeness uses k / sum(l_ij), where k = #reachable residues (excluding self)
 
 import os
 import re
@@ -165,7 +169,7 @@ def main():
     coor = _load_coor_matrix(in_coorfile)
     resID_list   = coor[:, 0]        # col1
     chainID_list = coor[:, 9]        # col10
-    CAxyz        = coor[:, 5:8]      # col6-8
+    CAxyz        = coor[:, 5:8]      # col6-8 (unused now, but kept for compatibility)
 
     # Decode nodes v = resID + chainID/10
     resID_seq   = np.floor(seq + 1e-6)
@@ -177,7 +181,7 @@ def main():
     Nchain = res_on_chain.size
     assert Nchain > 0, f"No residues from chain {CHAIN_ID_SELECTED} found in the selected path."
 
-    # --- Precompute step geometry & validity (CA distances) ---
+    # --- Precompute step geometry & validity (UNIT STEP COST) ---
     keyCoor = (resID_list.astype(np.int64) * 100) + chainID_list.astype(np.int64)
     coorIdxMap = {int(k): int(i) for i, k in enumerate(keyCoor)}
 
@@ -193,9 +197,8 @@ def main():
             invalid[k] = True
             dist[k] = 0.0
         else:
-            va = CAxyz[coorIdxMap[k1], :]
-            vb = CAxyz[coorIdxMap[k2], :]
-            dist[k] = float(np.linalg.norm(vb - va))
+            # UNIT COST PER VALID STEP (instead of Euclidean CA distance)
+            dist[k] = 1.0
 
     # S = [0; cumsum(dist)], C = [0; cumsum(invalid)]
     S = np.zeros(n, dtype=float)
@@ -353,7 +356,7 @@ def main():
                     fid.write(f"\t{v:4.1f}")
             fid.write("\n")
 
-    # --- Build symmetric "shortest of the pair" matrix for closeness ---
+    # --- Build "shortest of the pair" matrix for closeness (DIRECTED; NO MIN SYMM) ---
     start_nodes = M[:, 0]
     end_nodes   = M[:, 1]
     distances   = M[:, 2]
@@ -371,19 +374,20 @@ def main():
         j = idxMap[str(end_nodes[k])]
         if d < distMat[i, j]:
             distMat[i, j] = d
-        if d < distMat[j, i]:
-            distMat[j, i] = d
     np.fill_diagonal(distMat, 0.0)
-    distMat = np.minimum(distMat, distMat.T)
+    # NOTE: no distMat = np.minimum(distMat, distMat.T) here
 
-    # --- Closeness centrality ---
+    # --- Closeness centrality (reachability-consistent) ---
     closenessVals = np.zeros(Nres, dtype=float)
     for i in range(Nres):
         rowVals = distMat[i, :]
-        finiteVals = rowVals[np.isfinite(rowVals)]
-        s = float(np.sum(finiteVals))
-        if s > 0:
-            closenessVals[i] = (Nres - 1) / s
+        finite_mask = np.isfinite(rowVals)
+        # exclude self (diagonal, distance 0)
+        finite_mask[i] = False
+        k_reachable = int(np.count_nonzero(finite_mask))
+        if k_reachable > 0:
+            s = float(np.sum(rowVals[finite_mask]))
+            closenessVals[i] = k_reachable / s
         else:
             closenessVals[i] = 0.0
 
