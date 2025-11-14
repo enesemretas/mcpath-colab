@@ -1,6 +1,6 @@
 # betweenness.py
 # --------------------------
-# Computes betweenness centrality using the
+# Computes betweenness centrality for all residues using the
 # shortest paths stored in shortest_paths_all_pairs_chain1.
 #
 # For each unordered pair (j,k) with a finite shortest path:
@@ -11,13 +11,14 @@
 #
 # betweenness(i) = ( #paths where i is internal ) / (total_paths)
 #
-# Paths and nodes are encoded as v = resID + chainID/10.
+# Paths and nodes are encoded as v = resID + chainID/10,
+# where chainID is the numeric rank assigned by readpdb_strict.
 #
 # Outputs (analogous to closeness.py):
 #   * betweenness_float              : "  xx.x\t0.xxxxxx"
 #   * betweenness_peaks              : peak residues
 #   * betweenness_chain_labels.txt   : "'12A' , 0.096112" style
-#   * betweenness_chain_plot.png     : profile + peaks (all chains)
+#   * betweenness_chain_plot.png     : profile + peaks
 
 import os
 import re
@@ -53,6 +54,71 @@ def _pick_latest(basename: str, directory: str = ".") -> str:
     if best is None:
         raise FileNotFoundError(f"No file found for base '{basename}' (including numbered variants).")
     return os.path.join(directory, best)
+
+
+def _find_latest_pdb(directory: str = ".") -> str | None:
+    """
+    Find the most recently modified .pdb file in `directory`.
+    Returns full path or None if not found.
+    """
+    pdb_files = [f for f in os.listdir(directory) if f.lower().endswith(".pdb")]
+    if not pdb_files:
+        return None
+    pdb_files_full = [os.path.join(directory, f) for f in pdb_files]
+    pdb_files_full.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+    return pdb_files_full[0]
+
+
+def _build_chain_mapping_from_pdb(chain_nums: list[int], directory: str = ".") -> dict[int, str]:
+    """
+    Build mapping from numeric chain ID (rank used in encoding) to actual PDB chain letter.
+
+    - Find latest .pdb in `directory`.
+    - Read ATOM/HETATM records and extract chainID at column 22.
+    - Collect unique chain IDs in order of first appearance → list of letters.
+    - Map:
+          1 -> first letter, 2 -> second, ...
+      for any chain_nums in the provided list.
+
+    If anything fails or PDB is missing, fall back to k -> str(k).
+    """
+    chain_nums_sorted = sorted(set(chain_nums))
+    pdb_path = _find_latest_pdb(directory)
+    if pdb_path is None:
+        return {k: str(k) for k in chain_nums_sorted}
+
+    chain_letters_ordered: list[str] = []
+    seen = set()
+
+    try:
+        with open(pdb_path, "r") as f:
+            for line in f:
+                if not (line.startswith("ATOM") or line.startswith("HETATM")):
+                    continue
+                if len(line) < 22:
+                    continue
+                ch = line[21].strip()  # column 22 (1-based)
+                if not ch:
+                    continue
+                if ch not in seen:
+                    seen.add(ch)
+                    chain_letters_ordered.append(ch)
+    except Exception:
+        # On any error, fall back
+        return {k: str(k) for k in chain_nums_sorted}
+
+    if not chain_letters_ordered:
+        return {k: str(k) for k in chain_nums_sorted}
+
+    mapping: dict[int, str] = {}
+    for k in chain_nums_sorted:
+        idx = k - 1  # ranks are 1-based
+        if 0 <= idx < len(chain_letters_ordered):
+            mapping[k] = chain_letters_ordered[idx]
+        else:
+            mapping[k] = str(k)
+
+    return mapping
 
 
 def _decode_node(v: float):
@@ -134,17 +200,21 @@ def peakdet(v, delta):
 
 def main():
     """
-    Compute betweenness for ALL residues (all chains) that appear in
-    shortest_paths_all_pairs_chain1[_N] in the current directory.
+    Compute betweenness for all residues present in the shortest-paths file,
+    without requiring a chain ID. Chain letters in labels are taken from
+    the PDB via first-appearance order (consistent with readpdb_strict).
     """
     # --- open latest shortest_paths file ---
     paths_file = _pick_latest(PATHS_BASE)
+    work_dir = os.path.dirname(os.path.abspath(paths_file)) or "."
     print(f"Using shortest-paths file: {paths_file}")
 
     # betweenness counts: encoded node (res + chain/10) -> count of paths where it's internal
-    betw_counts = {}
+    betw_counts: dict[float, float] = {}
     # all residues (start, end or internal) so they are in output even if 0
-    residues_all = set()
+    residues_encoded_set = set()
+    # track which chain numeric IDs appear at all
+    chain_nums_set = set()
 
     # To avoid double counting j→k and k→j, use unordered pair keys
     seen_pairs = set()
@@ -174,6 +244,13 @@ def main():
                 # no valid shortest path; skip
                 continue
 
+            # decode start/end to track chain IDs and residues
+            for v in (s, t):
+                resid, chain = _decode_node(v)
+                residues_encoded_set.add(v)
+                chain_nums_set.add(chain)
+                betw_counts.setdefault(v, 0.0)
+
             # columns 4..end: path nodes (encoded) – may be empty
             nodes = []
             for p in parts[3:]:
@@ -188,16 +265,12 @@ def main():
                 # something odd; skip
                 continue
 
-            # record start/end residues so they appear in output even with 0 betweenness
-            for v in (s, t):
-                residues_all.add(v)
-                betw_counts.setdefault(v, 0.0)
-
-            # unordered pair key (avoid double-counting j–k and k–j)
+            # unordered pair key
             u = min(s, t)
             v2 = max(s, t)
             pair_key = (u, v2)
             if pair_key in seen_pairs:
+                # we've already processed this j–k pair
                 continue
             seen_pairs.add(pair_key)
 
@@ -214,11 +287,13 @@ def main():
             internal_unique = set(internal_nodes)
 
             for enc in internal_unique:
-                residues_all.add(enc)
+                resid, chain = _decode_node(enc)
+                residues_encoded_set.add(enc)
+                chain_nums_set.add(chain)
                 betw_counts.setdefault(enc, 0.0)
                 betw_counts[enc] += 1.0
 
-    if not residues_all:
+    if not residues_encoded_set:
         print("No residues found in shortest-paths file; nothing to do.")
         return
 
@@ -227,9 +302,16 @@ def main():
         total_paths = 1  # avoid division by zero; all numerators are zero anyway
 
     # Sort residues by encoded value (resID + chain/10)
-    residues_sorted = sorted(residues_all)
-    numer_vals = np.array([betw_counts.get(r, 0.0) for r in residues_sorted], dtype=float)
-    residues_encoded = np.array(residues_sorted, dtype=float)
+    residues_encoded = sorted(residues_encoded_set)
+    residues_encoded = np.array(residues_encoded, dtype=float)
+    numer_vals = np.array([betw_counts.get(r, 0.0) for r in residues_encoded], dtype=float)
+
+    # Decode residue numbers and chain numeric ranks
+    res_ids = np.array([_decode_node(enc)[0] for enc in residues_encoded], dtype=int)
+    chain_nums = np.array([_decode_node(enc)[1] for enc in residues_encoded], dtype=int)
+
+    # Build mapping numeric chainID -> PDB chain letter from PDB
+    chain_map = _build_chain_mapping_from_pdb(list(chain_nums_set), directory=work_dir)
 
     # Normalize by total_paths
     betw_vals = numer_vals / float(total_paths)
@@ -257,17 +339,11 @@ def main():
         else:
             maxtab = np.empty((0, 2))
 
-    # Decode residue numbers and chain IDs for labels
-    res_ids  = np.array([_decode_node(enc)[0] for enc in residues_encoded], dtype=int)
-    chains   = np.array([_decode_node(enc)[1] for enc in residues_encoded], dtype=int)
-
+    # Labels with real chain letters from PDB
     labels = []
-    for rid, ch in zip(res_ids, chains):
-        if 1 <= ch <= 26:
-            chain_letter = chr(ord("A") + ch - 1)
-        else:
-            chain_letter = str(ch)
-        labels.append(f"{rid}{chain_letter}")
+    for rid, cnum in zip(res_ids, chain_nums):
+        ch = chain_map.get(cnum, str(cnum))
+        labels.append(f"{rid}{ch}")
 
     # --- labels file: '12A' , 0.096112
     with open(LABELS_FILE, "w") as lf:
@@ -276,12 +352,11 @@ def main():
 
     # --- peaks file (detailed) ---
     with open(PEAKS_FILE, "w") as pf:
-        pf.write("# resID\tchainID\tencoded_node\tbetweenness_peak\n")
+        pf.write("# resID\tchainID_numeric\tencoded_node\tbetweenness_peak\n")
         for idx in peaks_idx:
-            rid, ch = _decode_node(residues_encoded[idx])
             pf.write(
-                f"{rid:4d}\t"
-                f"{ch:d}\t"
+                f"{res_ids[idx]:4d}\t"
+                f"{chain_nums[idx]:d}\t"
                 f"{residues_encoded[idx]:4.1f}\t"
                 f"{betw_vals[idx]:.6f}\n"
             )
@@ -300,7 +375,7 @@ def main():
     plt.xticks(x, labels, rotation=90, fontsize=6)
     plt.xlabel("Residue (number + chain)")
     plt.ylabel("Betweenness centrality")
-    plt.title("Betweenness centrality (all chains)")
+    plt.title("Betweenness centrality along all residues")
     if peaks_idx:
         plt.legend()
     plt.tight_layout()
@@ -312,18 +387,18 @@ def main():
 
     # Small text summary
     print("Summary (first few residues):")
-    for enc, num, val in list(zip(residues_encoded, numer_vals, betw_vals))[:10]:
-        resid, ch = _decode_node(enc)
+    for enc, num, val, rid, cnum in list(zip(residues_encoded, numer_vals, betw_vals, res_ids, chain_nums))[:10]:
+        ch = chain_map.get(cnum, str(cnum))
         print(
-            f"  residue {resid} chain {ch} (encoded {enc:4.1f}) "
+            f"  residue {rid}{ch} (encoded {enc:4.1f}) "
             f"-> paths_through_i = {num:.0f}, betweenness = {val:.6f}"
         )
 
     if peaks_idx:
-        print("Peak residues:")
+        print("Peak residues (resID + chain):")
         for idx in peaks_idx:
-            resid, ch = _decode_node(residues_encoded[idx])
-            print(f"  {resid} (chain {ch})  -> betweenness = {betw_vals[idx]:.6f}")
+            ch = chain_map.get(chain_nums[idx], str(chain_nums[idx]))
+            print(f"  {res_ids[idx]}{ch}  -> betweenness = {betw_vals[idx]:.6f}")
     else:
         print("No peaks found with delta = std(betweenness).")
 
