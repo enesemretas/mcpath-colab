@@ -3,16 +3,15 @@
 # Computes betweenness centrality on a chain using the
 # shortest paths stored in shortest_paths_all_pairs_chain1.
 #
-# Formula (paper):
-#   b_i = sum_{jk} g_jik / g_jk
-# where:
-#   g_jk   = number of shortest paths between j and k
-#   g_jik  = number of those paths that pass through i
+# For each unordered pair (j,k) with a finite shortest path:
+#   - Denominator (global): total_paths = number of such shortest paths.
+#   - Numerator for residue i: count how many of those paths have i as an
+#     INTERNAL node (not start or end). If residue i appears multiple times
+#     in the same path, it still counts only once for that path.
 #
-# In our current pipeline, for each pair (j,k) we keep
-# exactly ONE shortest path, so g_jk = 1.
-# Thus, for each unordered pair (j,k), if residue i is an
-# internal node on that path, it contributes +1 to b_i.
+# betweenness(i) = ( #paths where i is internal ) / (total_paths)
+#
+# Paths and nodes are encoded as v = resID + chainID/10.
 #
 # Outputs (analogous to closeness.py):
 #   * betweenness_float              : "  xx.x\t0.xxxxxx"
@@ -34,7 +33,7 @@ PLOT_FILE        = "betweenness_chain_plot.png"
 
 TOL = 1e-9
 
-# default – will be overridden if main(chain_id=...) is used
+# default – can be overridden via main(chain_id=...)
 CHAIN_ID_SELECTED = 1
 # ----------------------------------------
 
@@ -156,6 +155,10 @@ def peakdet(v, delta):
 
 
 def main(chain_id=None):
+    """
+    Compute betweenness on the chain specified by chain_id (e.g. 'A' or '1'),
+    using shortest_paths_all_pairs_chain1[_N] in the current directory.
+    """
     global CHAIN_ID_SELECTED
 
     # --- handle chain ID coming from Colab UI ---
@@ -168,13 +171,16 @@ def main(chain_id=None):
     print(f"Using shortest-paths file: {paths_file}")
     print(f"Betweenness will be computed for chain ID = {CHAIN_ID_SELECTED}")
 
-    # betweenness counts: encoded node (res + chain/10) -> count
+    # betweenness counts: encoded node (res + chain/10) -> count of paths where it's internal
     betw_counts = {}
-    # also track all residues on this chain (even if betw=0) so they appear in output
+    # all residues on this chain (start, end or internal) so they are in output even if 0
     residues_on_chain = set()
 
     # To avoid double counting j→k and k→j, use unordered pair keys
     seen_pairs = set()
+
+    # Global denominator: total number of shortest paths (unordered j,k) with finite distance
+    total_paths = 0
 
     # --- read file line by line ---
     with open(paths_file, "r") as f:
@@ -195,7 +201,7 @@ def main(chain_id=None):
 
             dist_str = parts[2].strip()
             if dist_str == "Inf":
-                # no valid path; skip
+                # no valid shortest path; skip
                 continue
 
             # columns 4..end: path nodes (encoded) – may be empty
@@ -212,7 +218,7 @@ def main(chain_id=None):
                 # something odd; skip
                 continue
 
-            # ensure start/end also recorded as residues on this chain (even if no betweenness)
+            # record start/end residues on this chain (betweenness can be 0 but they should appear)
             for v in (s, t):
                 resid, chain = _decode_node(v)
                 if chain == CHAIN_ID_SELECTED:
@@ -221,24 +227,29 @@ def main(chain_id=None):
 
             # unordered pair key
             u = min(s, t)
-            v = max(s, t)
-            pair_key = (u, v)
+            v2 = max(s, t)
+            pair_key = (u, v2)
             if pair_key in seen_pairs:
-                # we've already processed this unordered pair; skip the reverse row
+                # we've already processed this j–k pair
                 continue
             seen_pairs.add(pair_key)
 
-            # internal nodes: exclude first and last node in the path
+            # a valid shortest path for this unordered pair exists → update denominator
+            total_paths += 1
+
+            # internal nodes: exclude first and last
             if len(nodes) <= 2:
-                continue  # no internal residues
+                continue  # no internal residues for this path
 
             internal_nodes = nodes[1:-1]
 
-            # Update betweenness: for each internal residue on selected chain, +1
-            for enc in internal_nodes:
+            # each residue should count at most once per path, even if it appears multiple times
+            internal_unique = set(internal_nodes)
+
+            for enc in internal_unique:
                 resid, chain = _decode_node(enc)
                 if chain != CHAIN_ID_SELECTED:
-                    continue
+                    continue  # only count internal residues on the selected chain
                 residues_on_chain.add(enc)
                 betw_counts.setdefault(enc, 0.0)
                 betw_counts[enc] += 1.0
@@ -247,10 +258,17 @@ def main(chain_id=None):
         print("No residues found on selected chain in shortest-paths file; nothing to do.")
         return
 
+    if total_paths == 0:
+        print("No finite shortest paths found; betweenness will be zero for all residues.")
+        total_paths = 1  # avoid division by zero; all numerators are zero anyway
+
     # Sort residues by encoded value (resID + chain/10) – OK for single chain
     residues_sorted = sorted(residues_on_chain)
-    betw_vals = np.array([betw_counts.get(r, 0.0) for r in residues_sorted], dtype=float)
+    numer_vals = np.array([betw_counts.get(r, 0.0) for r in residues_sorted], dtype=float)
     residues_encoded = np.array(residues_sorted, dtype=float)
+
+    # Normalize by total_paths
+    betw_vals = numer_vals / float(total_paths)
 
     # --- write betweenness file in same style as closeness_float ---
     with open(BETWEENNESS_FILE, "w") as fid:
@@ -258,6 +276,7 @@ def main(chain_id=None):
             fid.write(f" {enc:4.1f}\t{val:.6f}\n")
 
     print(f"Wrote betweenness centrality to '{BETWEENNESS_FILE}'.")
+    print(f"Total number of shortest paths (denominator) = {total_paths}")
 
     # ----------------- Peak detection & reporting -----------------
     peaks_idx = []
@@ -327,9 +346,12 @@ def main(chain_id=None):
 
     # Small text summary
     print("Summary (first few residues):")
-    for enc, val in list(zip(residues_encoded, betw_vals))[:10]:
+    for enc, num, val in list(zip(residues_encoded, numer_vals, betw_vals))[:10]:
         resid, ch = _decode_node(enc)
-        print(f"  residue {resid} chain {ch} (encoded {enc:4.1f}) -> betweenness {val:.6f}")
+        print(
+            f"  residue {resid} chain {ch} (encoded {enc:4.1f}) "
+            f"-> paths_through_i = {num:.0f}, betweenness = {val:.6f}"
+        )
 
     if peaks_idx:
         print("Peak residues (resID on chain", chain_letter, "):")
