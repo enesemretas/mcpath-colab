@@ -376,7 +376,6 @@ def atomistic(ProteinName, param_file="vdw_cns.param", top_file="pdb_cns.top",
     if save_txt:
         out_path = f"{os.path.splitext(pdb_path)[0]}_atomistic.out"
         np.savetxt(out_path, normalized, fmt="%.8f", delimiter="\t")
-        print(f"Saved probability matrix to: {out_path}")
 
     return normalized
 
