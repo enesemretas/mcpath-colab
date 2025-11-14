@@ -13,14 +13,25 @@
 # exactly ONE shortest path, so g_jk = 1.
 # Thus, for each unordered pair (j,k), if residue i is an
 # internal node on that path, it contributes +1 to b_i.
+#
+# Outputs (analogous to closeness.py):
+#   * betweenness_float              : "  xx.x\t0.xxxxxx"
+#   * betweenness_peaks              : peak residues
+#   * betweenness_chain_labels.txt   : "'1A' , 0.096112" style
+#   * betweenness_chain_plot.png     : profile + peaks
 
 import os
 import re
 import numpy as np
+import matplotlib.pyplot as plt
 
 # ------------- configuration -------------
 PATHS_BASE       = "shortest_paths_all_pairs_chain1"
 BETWEENNESS_FILE = "betweenness_float"
+PEAKS_FILE       = "betweenness_peaks"
+LABELS_FILE      = "betweenness_chain_labels.txt"
+PLOT_FILE        = "betweenness_chain_plot.png"
+
 TOL = 1e-9
 
 # default – will be overridden if main(chain_id=...) is used
@@ -75,6 +86,73 @@ def _decode_node(v: float):
     resid = int(np.floor(v + 1e-6))
     chain = int(round((v - resid) * 10))
     return resid, chain
+
+
+# ------------------- MATLAB-like PEAKDET implementation -------------------
+def peakdet(v, delta):
+    """
+    Python version of the MATLAB 'peakdet' function by Eli Billauer.
+
+    v: 1D array-like of values
+    delta: positive scalar threshold
+    Returns:
+      maxtab: array([[idx_max, value_max], ...])
+      mintab: array([[idx_min, value_min], ...])
+    where idx_* are indices (0-based).
+    """
+    v = np.asarray(v, dtype=float).flatten()
+    if v.size == 0:
+        return np.empty((0, 2)), np.empty((0, 2))
+
+    if np.ndim(delta) != 0:
+        raise ValueError("Input argument DELTA must be a scalar")
+    if delta <= 0:
+        raise ValueError("Input argument DELTA must be positive")
+
+    maxtab = []
+    mintab = []
+
+    mn = np.inf
+    mx = -np.inf
+    mnpos = np.nan
+    mxpos = np.nan
+
+    lookformax = True
+
+    for i in range(len(v)):
+        this = v[i]
+        if this > mx:
+            mx = this
+            mxpos = i
+        if this < mn:
+            mn = this
+            mnpos = i
+
+        if lookformax:
+            if this < mx - delta:
+                maxtab.append((mxpos, mx))
+                mn = this
+                mnpos = i
+                lookformax = False
+        else:
+            if this > mn + delta:
+                mintab.append((mnpos, mn))
+                mx = this
+                mxpos = i
+                lookformax = True
+
+    if len(maxtab) == 0:
+        maxtab_arr = np.empty((0, 2))
+    else:
+        maxtab_arr = np.asarray(maxtab, dtype=float)
+
+    if len(mintab) == 0:
+        mintab_arr = np.empty((0, 2))
+    else:
+        mintab_arr = np.asarray(mintab, dtype=float)
+
+    return maxtab_arr, mintab_arr
+# -------------------------------------------------------------------------
 
 
 def main(chain_id=None):
@@ -171,23 +249,94 @@ def main(chain_id=None):
 
     # Sort residues by encoded value (resID + chain/10) – OK for single chain
     residues_sorted = sorted(residues_on_chain)
-    values = [betw_counts.get(r, 0.0) for r in residues_sorted]
-
-    # Optional: normalization (commented; you can enable if needed)
-    # N = len(residues_sorted)
-    # max_pairs = (N - 1) * (N - 2) / 2.0 if N > 2 else 1.0
-    # values = [v / max_pairs for v in values]
+    betw_vals = np.array([betw_counts.get(r, 0.0) for r in residues_sorted], dtype=float)
+    residues_encoded = np.array(residues_sorted, dtype=float)
 
     # --- write betweenness file in same style as closeness_float ---
     with open(BETWEENNESS_FILE, "w") as fid:
-        for enc, val in zip(residues_sorted, values):
+        for enc, val in zip(residues_encoded, betw_vals):
             fid.write(f" {enc:4.1f}\t{val:.6f}\n")
 
     print(f"Wrote betweenness centrality to '{BETWEENNESS_FILE}'.")
+
+    # ----------------- Peak detection & reporting -----------------
+    peaks_idx = []
+    if betw_vals.size > 0:
+        std_v = float(np.std(betw_vals))
+        if std_v > 0:
+            try:
+                maxtab, _ = peakdet(betw_vals, std_v)
+            except ValueError as e:
+                print("Peak detection warning:", e)
+                maxtab = np.empty((0, 2))
+            if maxtab.size > 0:
+                peaks_idx = maxtab[:, 0].astype(int).tolist()
+        else:
+            maxtab = np.empty((0, 2))
+
+    # Determine chain letter (for labels like "1A")
+    chain_num = CHAIN_ID_SELECTED
+    if 1 <= chain_num <= 26:
+        chain_letter = chr(ord("A") + chain_num - 1)
+    else:
+        chain_letter = str(chain_num)
+
+    # Decode residue numbers (integers)
+    res_ids = np.array([_decode_node(enc)[0] for enc in residues_encoded], dtype=int)
+    labels = [f"{rid}{chain_letter}" for rid in res_ids]
+
+    # --- labels file: '1A' , 0.096112
+    with open(LABELS_FILE, "w") as lf:
+        for lab, val in zip(labels, betw_vals):
+            lf.write(f"'{lab}' , {val:.6f}\n")
+
+    # --- peaks file (detailed) ---
+    with open(PEAKS_FILE, "w") as pf:
+        pf.write("# resID\tchainID\tencoded_node\tbetweenness_peak\n")
+        for idx in peaks_idx:
+            pf.write(
+                f"{res_ids[idx]:4d}\t"
+                f"{chain_num:d}\t"
+                f"{residues_encoded[idx]:4.1f}\t"
+                f"{betw_vals[idx]:.6f}\n"
+            )
+
+    # ----------------- Plot -----------------
+    x = np.arange(len(res_ids))
+
+    plt.figure(figsize=(12, 4))
+    plt.plot(x, betw_vals, marker="o", linestyle="-", label="Betweenness")
+
+    if peaks_idx:
+        peak_x = np.array(peaks_idx, dtype=int)
+        peak_y = betw_vals[peak_x]
+        plt.scatter(peak_x, peak_y, s=50, marker="s", label="Peaks")
+
+    plt.xticks(x, labels, rotation=90, fontsize=6)
+    plt.xlabel("Residue (number + chain)")
+    plt.ylabel("Betweenness centrality")
+    plt.title(f"Betweenness centrality along chain {chain_letter}")
+    if peaks_idx:
+        plt.legend()
+    plt.tight_layout()
+    plt.savefig(PLOT_FILE, dpi=300)
+    plt.close()
+
+    print(f"Saved betweenness plot to '{PLOT_FILE}' and labels to '{LABELS_FILE}'.")
+    print(f"Peaks written to '{PEAKS_FILE}'.")
+
+    # Small text summary
     print("Summary (first few residues):")
-    for enc, val in list(zip(residues_sorted, values))[:10]:
+    for enc, val in list(zip(residues_encoded, betw_vals))[:10]:
         resid, ch = _decode_node(enc)
         print(f"  residue {resid} chain {ch} (encoded {enc:4.1f}) -> betweenness {val:.6f}")
+
+    if peaks_idx:
+        print("Peak residues (resID on chain", chain_letter, "):")
+        for idx in peaks_idx:
+            print(f"  {res_ids[idx]}  -> betweenness = {betw_vals[idx]:.6f}")
+    else:
+        print("No peaks found on the selected chain with delta = std(betweenness).")
 
 
 if __name__ == "__main__":
