@@ -3,16 +3,17 @@
 # ---------------------------------------------------------------
 # - Reads latest path_file[_N] and coor_file[_N] in current dir
 # - path_file: first row is a long path of encoded nodes v = resID + chainID/10
+# - coor_file: columns 1=resID, 10=chainID (numeric)
 # - Distance l_ij = minimal number of steps along this path from i to j
 #                    (index difference q - p, with q > p)
-# - Closeness:
+# - Closeness (for all residues present in both .cor and path):
 #       O_i = (N-1) / sum_{j != i} l_ij
-#   where N is the number of residues on the selected chain.
+#   where N is the number of residues included.
 # - Outputs:
 #   * shortest_paths_all_pairs_chain1 : rows [start end distance nodes...]
 #   * closeness_float                  : "  xx.x\t0.xxxxxx"
 #   * closeness_peaks                  : peak residues from closeness profile
-#   * closeness_chain_labels.txt       : "'1A' , 0.096112" style
+#   * closeness_chain_labels.txt       : "'12A' , 0.096112" style
 #   * closeness_chain_plot.png         : profile + peaks
 
 import os
@@ -22,15 +23,14 @@ import matplotlib.pyplot as plt
 
 # --------------------------- configuration ---------------------------
 IN_PATH_BASE = "path_file"      # tab-separated; first row = long path
-IN_COOR_BASE = "coor_file"      # numeric; col1=resID, col10=chainID (only for info)
+IN_COOR_BASE = "coor_file"      # numeric; col1=resID, col10=chainID
 
 PATHS_FILE      = "shortest_paths_all_pairs_chain1"
 CLOSENESS_FILE  = "closeness_float"
 PEAKS_FILE      = "closeness_peaks"            # peak residues
-PLOT_FILE       = "closeness_chain_plot.png"   # plot for selected chain
-LABELS_FILE     = "closeness_chain_labels.txt" # '1A' , 0.096112 style
+PLOT_FILE       = "closeness_chain_plot.png"   # plot for all residues
+LABELS_FILE     = "closeness_chain_labels.txt" # '12A' , 0.096112 style
 
-CHAIN_ID_SELECTED = 1
 TOL = 1e-9
 # --------------------------------------------------------------------
 
@@ -74,7 +74,7 @@ def _load_path_first_row(pathfile: str) -> np.ndarray:
 
 def _load_coor_matrix(coorfile: str) -> np.ndarray:
     """
-    Load coor_file (only for sanity/info; not used in distance).
+    Load coor_file (only for residue + chain info; not used in distance).
     """
     coor = np.loadtxt(coorfile)
     if coor.ndim != 2 or coor.shape[1] < 10:
@@ -84,9 +84,11 @@ def _load_coor_matrix(coorfile: str) -> np.ndarray:
     return coor
 
 
-def encode_node(resid: float, chainid: float) -> float:
-    # MATLAB-style encoding: v = resid + chainid/10
-    return resid + chainid / 10.0
+def encode_node_float(resid: float, chain_num: float) -> float:
+    """
+    MATLAB-style encoding: v = resid + chain/10  (float).
+    """
+    return resid + chain_num / 10.0
 
 
 # ------------------- MATLAB-like PEAKDET implementation -------------------
@@ -156,29 +158,6 @@ def peakdet(v, delta):
 # -------------------------------------------------------------------------
 
 
-def _build_pos_lists(resID_seq, chainID_seq, chain_id_selected):
-    """
-    Build a dict: resid(int) -> sorted np.array of indices where that residue
-    appears on the selected chain. Single pass over the path (O(n)).
-    """
-    pos_dict = {}
-    for idx in range(resID_seq.size):
-        if chainID_seq[idx] != chain_id_selected:
-            continue
-        rid = int(resID_seq[idx])
-        if rid not in pos_dict:
-            pos_dict[rid] = []
-        pos_dict[rid].append(idx)
-
-    # convert lists to np.array and sort (they are already increasing but sort for safety)
-    for rid in pos_dict:
-        pos_arr = np.asarray(pos_dict[rid], dtype=int)
-        pos_arr.sort()
-        pos_dict[rid] = pos_arr
-
-    return pos_dict
-
-
 def _min_forward_steps(posA, posB):
     """
     Compute minimal q - p with q>p between two sorted index arrays posA and posB,
@@ -212,36 +191,7 @@ def _min_forward_steps(posA, posB):
     return best_len, best_p, best_q
 
 
-def _chain_to_int(ch):
-    """
-    Convert a chain ID from the UI to numeric:
-    'A' -> 1, 'B' -> 2, ..., 'Z' -> 26
-    numeric strings ('1','2',...) are passed through.
-    """
-    if ch is None:
-        return None
-    if isinstance(ch, str):
-        ch = ch.strip()
-        if not ch:
-            return None
-        # single letter like A,B,C,...
-        if ch.isalpha() and len(ch) == 1:
-            return ord(ch.upper()) - ord('A') + 1
-        # digit(s): "1", "2", ...
-        if ch.isdigit():
-            return int(ch)
-    # fallback: try int
-    return int(ch)
-
-
-def main(chain_id=None):
-    global CHAIN_ID_SELECTED
-
-    # if UI passes something, convert it
-    cid = _chain_to_int(chain_id)
-    if cid is not None:
-        CHAIN_ID_SELECTED = cid
-        
+def main():
     # --- pick latest files ---
     in_pathfile = _pick_latest(IN_PATH_BASE)
     in_coorfile = _pick_latest(IN_COOR_BASE)
@@ -251,27 +201,48 @@ def main(chain_id=None):
     print(f"  coor_file  -> {in_coorfile}")
 
     # ------------------------ Load data ------------------------
-    seq = _load_path_first_row(in_pathfile)  # long path
+    seq = _load_path_first_row(in_pathfile)  # long path (float encoded as resid + chain/10)
     n = seq.size
     assert n >= 2, "Path too short."
 
-    # coor is not used for distances, only for info/sanity if needed
     coor = _load_coor_matrix(in_coorfile)
 
-    # Decode nodes v = resID + chainID/10
-    resID_seq   = np.floor(seq + 1e-6)
-    chainID_seq = np.round((seq - resID_seq) * 10)
+    # From coor_file: residue & chain (numeric)
+    resID_cor  = coor[:, 0].astype(int)
+    chain_cor  = coor[:, 9].astype(int)  # column 10 (0-based index 9)
 
-    # --- Build position lists in ONE pass ---
-    pos_dict = _build_pos_lists(resID_seq, chainID_seq, CHAIN_ID_SELECTED)
+    # Build integer "node key" for residues in .cor:
+    # key = 10*resID + chainNum  (since encoding is resid + chain/10)
+    node_keys_cor = set(int(r * 10 + c) for r, c in zip(resID_cor, chain_cor))
 
-    # --- Residues on selected chain (SORTED by residue number) ---
-    res_on_chain = np.array(sorted(pos_dict.keys()), dtype=int)
-    N = res_on_chain.size
-    assert N > 0, f"No residues from chain {CHAIN_ID_SELECTED} found in the selected path."
+    # Convert path sequence to integer keys the same way:
+    # seq (float) = resid + chain/10 → key = round(10*seq)
+    seq_keys = np.round(seq * 10.0).astype(int)
 
-    # map residue index in res_on_chain -> its pos array
-    pos_list = [pos_dict[rid] for rid in res_on_chain]
+    # Build position list for all nodes appearing in the path
+    from collections import defaultdict
+    pos_dict_all = defaultdict(list)
+    for idx, k in enumerate(seq_keys):
+        pos_dict_all[k].append(idx)
+    for k in pos_dict_all:
+        arr = np.asarray(pos_dict_all[k], dtype=int)
+        arr.sort()
+        pos_dict_all[k] = arr
+
+    # Restrict to residues that are both in .cor and in the path
+    common_keys = sorted(k for k in node_keys_cor if k in pos_dict_all)
+    if not common_keys:
+        raise RuntimeError("No residues found that are common to .cor and path_file.")
+
+    N = len(common_keys)
+    node_keys = np.array(common_keys, dtype=int)
+
+    # Decode back to resID and chainNum from key = 10*resID + chainNum
+    resIDs = (node_keys // 10).astype(int)
+    chainNums = (node_keys % 10).astype(int)
+
+    # position lists for each node
+    pos_list = [pos_dict_all[k] for k in node_keys]
 
     # --- Distance matrix L: minimal index difference along the path (q - p, q>p) ---
     # Also store best start/end indices in seq for reconstructing the actual subpath.
@@ -279,7 +250,6 @@ def main(chain_id=None):
     start_idx = np.full((N, N), -1, dtype=int)
     end_idx   = np.full((N, N), -1, dtype=int)
 
-    # main double loop over residues (N typically small, e.g. <= 300)
     for a in range(N):
         posA = pos_list[a]
         if posA.size == 0:
@@ -301,6 +271,7 @@ def main(chain_id=None):
     np.fill_diagonal(L, 0.0)
 
     # --- Build PATHS_FILE: [start end distance nodes...] ---
+    # start/end are encoded float nodes (resID + chain/10), segments from original seq
     maxNodes = 0
     for a in range(N):
         for b in range(N):
@@ -316,16 +287,14 @@ def main(chain_id=None):
     row = 0
 
     for a in range(N):
-        ridA = float(res_on_chain[a])
+        start_enc = node_keys[a] / 10.0  # float encoded
         for b in range(N):
             if a == b:
                 continue
             row += 1
-            ridB = float(res_on_chain[b])
-            startVal = encode_node(ridA, float(CHAIN_ID_SELECTED))
-            endVal   = encode_node(ridB, float(CHAIN_ID_SELECTED))
-            M[row-1, 0] = startVal
-            M[row-1, 1] = endVal
+            end_enc = node_keys[b] / 10.0
+            M[row-1, 0] = start_enc
+            M[row-1, 1] = end_enc
 
             ib = start_idx[a, b]
             jb = end_idx[a, b]
@@ -361,40 +330,35 @@ def main(chain_id=None):
 
     # --- Closeness centrality (vectorized) ---
     # distances are directed (i -> j). For each i, sum finite l_ij, j != i.
-    # Build a mask of finite entries, then zero out infinities.
     finite_mask = np.isfinite(L)
-    # exclude self-distances from the sum
-    np.fill_diagonal(finite_mask, False)
+    np.fill_diagonal(finite_mask, False)   # exclude self-distances
     L_for_sum = np.where(finite_mask, L, 0.0)
     sum_dists = np.sum(L_for_sum, axis=1)  # shape (N,)
 
-    # (N-1)/sum_dists; where sum_dists==0 => closeness=0
     closenessVals = np.zeros(N, dtype=float)
     nonzero = sum_dists > 0
     closenessVals[nonzero] = (N - 1) / sum_dists[nonzero]
 
-    # Encoded nodes (resID + chainID/10)
-    residues_encoded = np.array(
-        [encode_node(float(rid), float(CHAIN_ID_SELECTED)) for rid in res_on_chain],
-        dtype=float
-    )
+    # Encoded nodes v = resID + chain/10
+    residues_encoded = node_keys.astype(float) / 10.0
 
     # --- Save CLOSENESS_FILE: "  xx.x\t0.xxxxxx" ---
     with open(CLOSENESS_FILE, "w") as fid:
         for i in range(N):
             fid.write(f" {residues_encoded[i]:4.1f}\t{closenessVals[i]:.6f}\n")
 
-    # ----------------- Peak residues via peakdet (on selected chain) -----------------
-    res_int_chain   = res_on_chain.copy()
-    closeness_chain = closenessVals.copy()
+    # ----------------- Peak residues via peakdet (for all residues) -----------------
+    res_int_all   = resIDs.copy()
+    chain_int_all = chainNums.copy()
+    closeness_all = closenessVals.copy()
 
     peaks_idx = []
-    if closeness_chain.size > 0:
-        v = closeness_chain
+    if closeness_all.size > 0:
+        v = closeness_all
         std_v = float(np.std(v))
         if std_v > 0:
             try:
-                maxtab, mintab = peakdet(v, std_v)
+                maxtab, _ = peakdet(v, std_v)
             except ValueError as e:
                 print("Peak detection warning:", e)
                 maxtab = np.empty((0, 2))
@@ -406,42 +370,42 @@ def main(chain_id=None):
         fid.write("# resID\tchainID\tencoded_node\tcloseness_peak\n")
         for idx in peaks_idx:
             fid.write(
-                f"{res_int_chain[idx]:4d}\t"
-                f"{CHAIN_ID_SELECTED:d}\t"
+                f"{res_int_all[idx]:4d}\t"
+                f"{chain_int_all[idx]:d}\t"
                 f"{residues_encoded[idx]:4.1f}\t"
-                f"{closeness_chain[idx]:.6f}\n"
+                f"{closeness_all[idx]:.6f}\n"
             )
 
-    # ----------------- Plot & label file for closeness on chain -----------------
-    if res_int_chain.size > 0:
-        # chain letter (for "1A", "2A", ...)
-        if 1 <= CHAIN_ID_SELECTED <= 26:
-            chain_letter = chr(ord("A") + CHAIN_ID_SELECTED - 1)
-        else:
-            chain_letter = str(CHAIN_ID_SELECTED)
+    # ----------------- Plot & label file for closeness -----------------
+    if res_int_all.size > 0:
+        labels = []
+        for r, c in zip(res_int_all, chain_int_all):
+            if 1 <= c <= 26:
+                ch = chr(ord("A") + c - 1)
+            else:
+                ch = str(c)
+            labels.append(f"{r}{ch}")
 
-        labels = [f"{rid}{chain_letter}" for rid in res_int_chain]
-
-        # Text file: '1A' , 0.096112
+        # Text file: '12A' , 0.096112
         with open(LABELS_FILE, "w") as lf:
-            for lab, val in zip(labels, closeness_chain):
+            for lab, val in zip(labels, closeness_all):
                 lf.write(f"'{lab}' , {val:.6f}\n")
 
         # PLOT: all residues + peaks
-        x = np.arange(len(res_int_chain))
+        x = np.arange(len(res_int_all))
 
         plt.figure(figsize=(12, 4))
-        plt.plot(x, closeness_chain, marker="o", linestyle="-", label="Closeness")
+        plt.plot(x, closeness_all, marker="o", linestyle="-", label="Closeness")
 
         if peaks_idx:
             peak_x = np.array(peaks_idx, dtype=int)
-            peak_y = closeness_chain[peak_x]
+            peak_y = closeness_all[peak_x]
             plt.scatter(peak_x, peak_y, s=50, marker="s", label="Peaks")
 
         plt.xticks(x, labels, rotation=90, fontsize=6)
         plt.xlabel("Residue (number + chain)")
         plt.ylabel("Closeness centrality")
-        plt.title(f"Closeness centrality along chain {chain_letter} (step-count metric)")
+        plt.title("Closeness centrality along all residues (step-count metric)")
         if peaks_idx:
             plt.legend()
         plt.tight_layout()
@@ -450,16 +414,22 @@ def main(chain_id=None):
 
         print(f"Saved closeness plot to '{PLOT_FILE}' and labels to '{LABELS_FILE}'.")
     else:
-        print("No residues on selected chain for plotting / label export.")
+        print("No residues for plotting / label export.")
 
-    print(f'Wrote {PATHS_FILE}, {CLOSENESS_FILE}, {PEAKS_FILE} (peaks), and {LABELS_FILE}.')
+    print(f"Wrote {PATHS_FILE}, {CLOSENESS_FILE}, {PEAKS_FILE} (peaks), and {LABELS_FILE}.")
 
     if peaks_idx:
-        print("Peak residues (resID on chain", CHAIN_ID_SELECTED, "):")
+        print("Peak residues (resID + chain):")
         for idx in peaks_idx:
-            print(f"  {res_int_chain[idx]}  -> closeness = {closeness_chain[idx]:.6f}")
+            if 1 <= chain_int_all[idx] <= 26:
+                ch = chr(ord("A") + chain_int_all[idx] - 1)
+            else:
+                ch = str(chain_int_all[idx])
+            print(
+                f"  {res_int_all[idx]}{ch}  -> closeness = {closeness_all[idx]:.6f}"
+            )
     else:
-        print("No peaks found on the selected chain with delta = std(closeness).")
+        print("No peaks found with delta = std(closeness).")
 
 
 if __name__ == "__main__":
