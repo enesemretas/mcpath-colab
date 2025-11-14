@@ -519,7 +519,7 @@ def main():
     else:
         print("No residues for plotting / label export.")
 
-    print(f"Wrote {PATHS_FILE}, {CLOSENESS_FILE}, {PEAKS_FILE} (peaks), and {LABELS_FILE}.")
+    # print(f"Wrote {PATHS_FILE}, {CLOSENESS_FILE}, {PEAKS_FILE} (peaks), and {LABELS_FILE}.")
 
     if peaks_idx:
         print("Peak residues (resID + chain):")
