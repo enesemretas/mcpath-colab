@@ -207,7 +207,7 @@ def main():
     # --- open latest shortest_paths file ---
     paths_file = _pick_latest(PATHS_BASE)
     work_dir = os.path.dirname(os.path.abspath(paths_file)) or "."
-    print(f"Using shortest-paths file: {paths_file}")
+    # print(f"Using shortest-paths file: {paths_file}")
 
     # betweenness counts: encoded node (res + chain/10) -> count of paths where it's internal
     betw_counts: dict[float, float] = {}
@@ -324,8 +324,8 @@ def main():
         for enc, val in zip(residues_encoded, betw_vals):
             fid.write(f" {enc:4.1f}\t{val:.6f}\n")
 
-    print(f"Wrote betweenness centrality to '{BETWEENNESS_FILE}'.")
-    print(f"Total number of shortest paths (denominator) = {total_paths}")
+    # print(f"Wrote betweenness centrality to '{BETWEENNESS_FILE}'.")
+    # print(f"Total number of shortest paths (denominator) = {total_paths}")
 
     # ----------------- Peak detection & reporting -----------------
     peaks_idx = []
@@ -417,17 +417,17 @@ def main():
     plt.savefig(PLOT_FILE, dpi=300, bbox_inches="tight")
     plt.close()
 
-    print(f"Saved betweenness plot to '{PLOT_FILE}' and labels to '{LABELS_FILE}'.")
-    print(f"Peaks written to '{PEAKS_FILE}'.")
+    # print(f"Saved betweenness plot to '{PLOT_FILE}' and labels to '{LABELS_FILE}'.")
+    # print(f"Peaks written to '{PEAKS_FILE}'.")
 
     # Small text summary
-    print("Summary (first few residues):")
+    # print("Summary (first few residues):")
     for enc, num, val, rid, cnum in list(zip(residues_encoded, numer_vals, betw_vals, res_ids, chain_nums))[:10]:
         ch = chain_map.get(cnum, str(cnum))
-        print(
-            f"  residue {rid}{ch} (encoded {enc:4.1f}) "
-            f"-> paths_through_i = {num:.0f}, betweenness = {val:.6f}"
-        )
+    #    print(
+    #        f"  residue {rid}{ch} (encoded {enc:4.1f}) "
+    #        f"-> paths_through_i = {num:.0f}, betweenness = {val:.6f}"
+    #    )
 
     if peaks_idx:
         print("Peak residues (resID + chain):")
