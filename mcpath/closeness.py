@@ -212,7 +212,36 @@ def _min_forward_steps(posA, posB):
     return best_len, best_p, best_q
 
 
-def main():
+def _chain_to_int(ch):
+    """
+    Convert a chain ID from the UI to numeric:
+    'A' -> 1, 'B' -> 2, ..., 'Z' -> 26
+    numeric strings ('1','2',...) are passed through.
+    """
+    if ch is None:
+        return None
+    if isinstance(ch, str):
+        ch = ch.strip()
+        if not ch:
+            return None
+        # single letter like A,B,C,...
+        if ch.isalpha() and len(ch) == 1:
+            return ord(ch.upper()) - ord('A') + 1
+        # digit(s): "1", "2", ...
+        if ch.isdigit():
+            return int(ch)
+    # fallback: try int
+    return int(ch)
+
+
+def main(chain_id=None):
+    global CHAIN_ID_SELECTED
+
+    # if UI passes something, convert it
+    cid = _chain_to_int(chain_id)
+    if cid is not None:
+        CHAIN_ID_SELECTED = cid
+        
     # --- pick latest files ---
     in_pathfile = _pick_latest(IN_PATH_BASE)
     in_coorfile = _pick_latest(IN_COOR_BASE)
