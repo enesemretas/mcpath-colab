@@ -301,12 +301,15 @@ def main():
         print("No finite shortest paths found; betweenness will be zero for all residues.")
         total_paths = 1  # avoid division by zero; all numerators are zero anyway
 
-    # Sort residues by encoded value (resID + chain/10)
-    residues_encoded = sorted(residues_encoded_set)
-    residues_encoded = np.array(residues_encoded, dtype=float)
+    # --- sort residues grouped by chainID (numeric rank) and then residue ID ---
+    residues_sorted = sorted(
+        residues_encoded_set,
+        key=lambda v: (_decode_node(v)[1], _decode_node(v)[0])  # (chainID, resid)
+    )
+    residues_encoded = np.array(residues_sorted, dtype=float)
     numer_vals = np.array([betw_counts.get(r, 0.0) for r in residues_encoded], dtype=float)
 
-    # Decode residue numbers and chain numeric ranks
+    # Decode residue numbers and chain numeric ranks (in the new grouped order)
     res_ids = np.array([_decode_node(enc)[0] for enc in residues_encoded], dtype=int)
     chain_nums = np.array([_decode_node(enc)[1] for enc in residues_encoded], dtype=int)
 
@@ -339,7 +342,7 @@ def main():
         else:
             maxtab = np.empty((0, 2))
 
-    # Labels with real chain letters from PDB
+    # Labels with real chain letters from PDB (same grouped order)
     labels = []
     for rid, cnum in zip(res_ids, chain_nums):
         ch = chain_map.get(cnum, str(cnum))
@@ -364,22 +367,54 @@ def main():
     # ----------------- Plot -----------------
     x = np.arange(len(res_ids))
 
-    plt.figure(figsize=(12, 4))
-    plt.plot(x, betw_vals, marker="o", linestyle="-", label="Betweenness")
+    plt.figure(figsize=(14, 4))
+    plt.plot(x, betw_vals, marker="o", linestyle="-",
+             linewidth=1.0, markersize=2.5, label="Betweenness")
 
     if peaks_idx:
         peak_x = np.array(peaks_idx, dtype=int)
         peak_y = betw_vals[peak_x]
-        plt.scatter(peak_x, peak_y, s=50, marker="s", label="Peaks")
+        plt.scatter(peak_x, peak_y, s=40, marker="s", label="Peaks")
 
-    plt.xticks(x, labels, rotation=90, fontsize=6)
-    plt.xlabel("Residue (number + chain)")
+    # --- Make x-axis readable: show at most ~80 labels ---
+    Nres = len(labels)
+    if Nres <= 80:
+        tick_positions = x
+    else:
+        step = max(1, Nres // 80)
+        tick_positions = x[::step]
+    tick_labels = [labels[i] for i in tick_positions]
+    plt.xticks(tick_positions, tick_labels, rotation=90, fontsize=6)
+
+    # --- Visual chain grouping: vertical lines and chain letters on top ---
+    if betw_vals.size > 0:
+        ymax = float(np.max(betw_vals))
+    else:
+        ymax = 1.0
+
+    unique_chains, first_idx, counts = np.unique(chain_nums, return_index=True, return_counts=True)
+
+    # vertical separators between chains
+    for i in range(1, len(first_idx)):
+        plt.axvline(first_idx[i] - 0.5, linestyle="--", linewidth=0.5, alpha=0.5)
+
+    # chain letters above each chain block
+    for ch_num, start, count in zip(unique_chains, first_idx, counts):
+        center = start + (count - 1) / 2.0
+        ch_letter = chain_map.get(int(ch_num), str(int(ch_num)))
+        plt.text(center, ymax * 1.02, ch_letter,
+                 ha="center", va="bottom", fontsize=8)
+
+    plt.ylim(0, ymax * 1.10 if ymax > 0 else 1.0)
+
+    plt.xlabel("Residue (grouped by chain: number + chain)")
     plt.ylabel("Betweenness centrality")
     plt.title("Betweenness centrality along all residues")
+
     if peaks_idx:
         plt.legend()
     plt.tight_layout()
-    plt.savefig(PLOT_FILE, dpi=300)
+    plt.savefig(PLOT_FILE, dpi=300, bbox_inches="tight")
     plt.close()
 
     print(f"Saved betweenness plot to '{PLOT_FILE}' and labels to '{LABELS_FILE}'.")
