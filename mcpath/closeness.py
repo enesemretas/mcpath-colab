@@ -307,19 +307,23 @@ def main():
         pos_dict_all[k] = arr
 
     # Restrict to residues that are both in .cor and in the path
-    common_keys = sorted(k for k in node_keys_cor if k in pos_dict_all)
+    common_keys = [k for k in node_keys_cor if k in pos_dict_all]
     if not common_keys:
         raise RuntimeError("No residues found that are common to .cor and path_file.")
 
-    N = len(common_keys)
-    node_keys = np.array(common_keys, dtype=int)
+    # Sort residues grouped by chain ID first, then by residue ID
+    # key = 10*resID + chainNum → resID = key // 10, chainNum = key % 10
+    common_keys_sorted = sorted(common_keys, key=lambda k: (k % 10, k // 10))
+    node_keys = np.array(common_keys_sorted, dtype=int)
 
     # Decode back to resID and chainNum from key = 10*resID + chainNum
     resIDs = (node_keys // 10).astype(int)
     chainNums = (node_keys % 10).astype(int)
 
-    # position lists for each node
+    # position lists for each node (in the new chain-grouped order)
     pos_list = [pos_dict_all[k] for k in node_keys]
+
+    N = len(node_keys)
 
     # --- Distance matrix L: minimal index difference along the path (q - p, q>p) ---
     # Also store best start/end indices in seq for reconstructing the actual subpath.
@@ -382,9 +386,9 @@ def main():
                 M[row-1, 2] = L[a, b]
                 M[row-1, 3:3+seg.size] = seg
 
-    # Sort rows by start then end
-    order = np.lexsort((M[:, 1], M[:, 0]))
-    M = M[order, :]
+    # Sort rows by start then end (encodings)
+    order_paths = np.lexsort((M[:, 1], M[:, 0]))
+    M = M[order_paths, :]
 
     # --- Write PATHS_FILE with 6-decimal distance in column 3 ---
     with open(PATHS_FILE, "w") as fid:
@@ -455,6 +459,7 @@ def main():
 
     # ----------------- Plot & label file for closeness -----------------
     if res_int_all.size > 0:
+        # Human-readable labels (residue + real chain letter)
         labels = []
         for r, c in zip(res_int_all, chain_int_all):
             ch = chain_map.get(c, str(c))
@@ -465,25 +470,49 @@ def main():
             for lab, val in zip(labels, closeness_all):
                 lf.write(f"'{lab}' , {val:.6f}\n")
 
-        # PLOT: all residues + peaks
+        # PLOT: all residues + peaks (x-axis grouped by chain)
         x = np.arange(len(res_int_all))
 
-        plt.figure(figsize=(12, 4))
-        plt.plot(x, closeness_all, marker="o", linestyle="-", label="Closeness")
+        plt.figure(figsize=(14, 4))
+        plt.plot(x, closeness_all, marker="o", linestyle="-", linewidth=1.0, markersize=2.5, label="Closeness")
 
         if peaks_idx:
             peak_x = np.array(peaks_idx, dtype=int)
             peak_y = closeness_all[peak_x]
-            plt.scatter(peak_x, peak_y, s=50, marker="s", label="Peaks")
+            plt.scatter(peak_x, peak_y, s=40, marker="s", label="Peaks")
 
-        plt.xticks(x, labels, rotation=90, fontsize=6)
-        plt.xlabel("Residue (number + chain)")
+        # --- Make x-axis readable: show at most ~80 labels ---
+        Nres = len(labels)
+        if Nres <= 80:
+            tick_positions = x
+        else:
+            step = max(1, Nres // 80)
+            tick_positions = x[::step]
+        tick_labels = [labels[i] for i in tick_positions]
+
+        plt.xticks(tick_positions, tick_labels, rotation=90, fontsize=6)
+
+        # --- Visual chain grouping: vertical lines and chain letters on top ---
+        unique_chains, first_idx, counts = np.unique(chain_int_all, return_index=True, return_counts=True)
+        ymax = float(np.max(closeness_all)) if closeness_all.size > 0 else 1.0
+        for i in range(1, len(first_idx)):
+            # vertical separator between chains
+            plt.axvline(first_idx[i] - 0.5, linestyle="--", linewidth=0.5, alpha=0.5)
+
+        for ch_num, start, count in zip(unique_chains, first_idx, counts):
+            center = start + (count - 1) / 2.0
+            ch_letter = chain_map.get(int(ch_num), str(int(ch_num)))
+            plt.text(center, ymax * 1.02, ch_letter,
+                     ha="center", va="bottom", fontsize=8)
+
+        plt.xlabel("Residue (grouped by chain: number + chain)")
         plt.ylabel("Closeness centrality")
         plt.title("Closeness centrality along all residues (step-count metric)")
+
         if peaks_idx:
             plt.legend()
         plt.tight_layout()
-        plt.savefig(PLOT_FILE, dpi=300)
+        plt.savefig(PLOT_FILE, dpi=300, bbox_inches="tight")
         plt.close()
 
         print(f"Saved closeness plot to '{PLOT_FILE}' and labels to '{LABELS_FILE}'.")
