@@ -51,7 +51,9 @@ def _pick_latest(basename: str, directory: str = ".") -> str:
                 best_k = k
                 best = fname
     if best is None:
-        raise FileNotFoundError(f"No file found for base '{basename}' (including numbered variants).")
+        raise FileNotFoundError(
+            f"No file found for base '{basename}' (including numbered variants)."
+        )
     return os.path.join(directory, best)
 
 
@@ -76,7 +78,9 @@ def _load_coor_matrix(coorfile: str) -> np.ndarray:
     """
     coor = np.loadtxt(coorfile)
     if coor.ndim != 2 or coor.shape[1] < 10:
-        raise ValueError("coor_file must have at least 10 columns (got shape %s)" % (coor.shape,))
+        raise ValueError(
+            "coor_file must have at least 10 columns (got shape %s)" % (coor.shape,)
+        )
     return coor
 
 
@@ -152,6 +156,62 @@ def peakdet(v, delta):
 # -------------------------------------------------------------------------
 
 
+def _build_pos_lists(resID_seq, chainID_seq, chain_id_selected):
+    """
+    Build a dict: resid(int) -> sorted np.array of indices where that residue
+    appears on the selected chain. Single pass over the path (O(n)).
+    """
+    pos_dict = {}
+    for idx in range(resID_seq.size):
+        if chainID_seq[idx] != chain_id_selected:
+            continue
+        rid = int(resID_seq[idx])
+        if rid not in pos_dict:
+            pos_dict[rid] = []
+        pos_dict[rid].append(idx)
+
+    # convert lists to np.array and sort (they are already increasing but sort for safety)
+    for rid in pos_dict:
+        pos_arr = np.asarray(pos_dict[rid], dtype=int)
+        pos_arr.sort()
+        pos_dict[rid] = pos_arr
+
+    return pos_dict
+
+
+def _min_forward_steps(posA, posB):
+    """
+    Compute minimal q - p with q>p between two sorted index arrays posA and posB,
+    using a two-pointer linear scan (O(lenA + lenB)).
+    Returns (best_len, best_p, best_q), where best_len=np.inf if no q>p.
+    """
+    i = 0
+    j = 0
+    lenA = posA.size
+    lenB = posB.size
+    best_len = np.inf
+    best_p = -1
+    best_q = -1
+
+    # We want, for each p in posA, the smallest q in posB such that q>p.
+    # Two-pointer strategy.
+    while i < lenA and j < lenB:
+        p = posA[i]
+        q = posB[j]
+        if q <= p:
+            j += 1
+        else:
+            d = q - p
+            if d < best_len - TOL:
+                best_len = d
+                best_p = p
+                best_q = q
+            # move to next p; maybe there's an even closer q for larger p
+            i += 1
+
+    return best_len, best_p, best_q
+
+
 def main():
     # --- pick latest files ---
     in_pathfile = _pick_latest(IN_PATH_BASE)
@@ -173,18 +233,16 @@ def main():
     resID_seq   = np.floor(seq + 1e-6)
     chainID_seq = np.round((seq - resID_seq) * 10)
 
+    # --- Build position lists in ONE pass ---
+    pos_dict = _build_pos_lists(resID_seq, chainID_seq, CHAIN_ID_SELECTED)
+
     # --- Residues on selected chain (SORTED by residue number) ---
-    mask_chain = (chainID_seq == CHAIN_ID_SELECTED)
-    res_on_chain = np.unique(resID_seq[mask_chain]).astype(int)
+    res_on_chain = np.array(sorted(pos_dict.keys()), dtype=int)
     N = res_on_chain.size
     assert N > 0, f"No residues from chain {CHAIN_ID_SELECTED} found in the selected path."
 
-    # --- Build position lists pos[rid] = sorted indices where that residue appears in seq ---
-    pos = {}
-    for rid in res_on_chain:
-        rid_val = float(rid)
-        idx = np.where((resID_seq == rid_val) & (chainID_seq == CHAIN_ID_SELECTED))[0]
-        pos[rid] = np.sort(idx)
+    # map residue index in res_on_chain -> its pos array
+    pos_list = [pos_dict[rid] for rid in res_on_chain]
 
     # --- Distance matrix L: minimal index difference along the path (q - p, q>p) ---
     # Also store best start/end indices in seq for reconstructing the actual subpath.
@@ -192,39 +250,19 @@ def main():
     start_idx = np.full((N, N), -1, dtype=int)
     end_idx   = np.full((N, N), -1, dtype=int)
 
-    # map residue -> index in matrix
-    rid_to_idx = {rid: i for i, rid in enumerate(res_on_chain)}
-
+    # main double loop over residues (N typically small, e.g. <= 300)
     for a in range(N):
-        ra = res_on_chain[a]
-        posA = pos[ra]
+        posA = pos_list[a]
         if posA.size == 0:
             continue
-
         for b in range(N):
             if a == b:
                 continue
-            rb = res_on_chain[b]
-            posB = pos[rb]
+            posB = pos_list[b]
             if posB.size == 0:
                 continue
 
-            best_len = np.inf
-            best_p = -1
-            best_q = -1
-
-            # For each occurrence of ra, find first occurrence of rb to the right (q > p)
-            for p in posA:
-                # first index in posB with value > p
-                idxB = np.searchsorted(posB, p + 1)
-                if idxB < posB.size:
-                    q = posB[idxB]
-                    d = q - p
-                    if d < best_len - TOL:
-                        best_len = d
-                        best_p = p
-                        best_q = q
-
+            best_len, best_p, best_q = _min_forward_steps(posA, posB)
             if best_len < np.inf:
                 L[a, b] = float(best_len)
                 start_idx[a, b] = best_p
@@ -239,11 +277,9 @@ def main():
         for b in range(N):
             if a == b:
                 continue
-            if start_idx[a, b] < 0 or end_idx[a, b] < 0:
-                continue
             ib = start_idx[a, b]
             jb = end_idx[a, b]
-            if jb >= ib:
+            if ib >= 0 and jb >= ib:
                 maxNodes = max(maxNodes, jb - ib + 1)
 
     totalRows = N * (N - 1)
@@ -251,22 +287,22 @@ def main():
     row = 0
 
     for a in range(N):
+        ridA = float(res_on_chain[a])
         for b in range(N):
             if a == b:
                 continue
             row += 1
-            ridA = float(res_on_chain[a])
             ridB = float(res_on_chain[b])
             startVal = encode_node(ridA, float(CHAIN_ID_SELECTED))
             endVal   = encode_node(ridB, float(CHAIN_ID_SELECTED))
             M[row-1, 0] = startVal
             M[row-1, 1] = endVal
 
-            if start_idx[a, b] < 0 or end_idx[a, b] < 0:
+            ib = start_idx[a, b]
+            jb = end_idx[a, b]
+            if ib < 0 or jb < 0:
                 M[row-1, 2] = np.inf
             else:
-                ib = start_idx[a, b]
-                jb = end_idx[a, b]
                 seg = seq[ib:jb+1]
                 M[row-1, 2] = L[a, b]
                 M[row-1, 3:3+seg.size] = seg
@@ -294,21 +330,19 @@ def main():
                     fid.write(f"\t{v:4.1f}")
             fid.write("\n")
 
-    # --- Closeness centrality on this step-count distance matrix ---
-    # Here we interpret distances as directed (i -> j via q>p).
-    # Closeness: O_i = (N-1) / sum_{j != i} l_ij
+    # --- Closeness centrality (vectorized) ---
+    # distances are directed (i -> j). For each i, sum finite l_ij, j != i.
+    # Build a mask of finite entries, then zero out infinities.
+    finite_mask = np.isfinite(L)
+    # exclude self-distances from the sum
+    np.fill_diagonal(finite_mask, False)
+    L_for_sum = np.where(finite_mask, L, 0.0)
+    sum_dists = np.sum(L_for_sum, axis=1)  # shape (N,)
+
+    # (N-1)/sum_dists; where sum_dists==0 => closeness=0
     closenessVals = np.zeros(N, dtype=float)
-    for i in range(N):
-        rowVals = L[i, :]
-        # exclude self
-        mask = np.isfinite(rowVals)
-        mask[i] = False
-        finiteVals = rowVals[mask]
-        if finiteVals.size > 0:
-            s = float(np.sum(finiteVals))
-            closenessVals[i] = (N - 1) / s
-        else:
-            closenessVals[i] = 0.0
+    nonzero = sum_dists > 0
+    closenessVals[nonzero] = (N - 1) / sum_dists[nonzero]
 
     # Encoded nodes (resID + chainID/10)
     residues_encoded = np.array(
@@ -325,7 +359,6 @@ def main():
     res_int_chain   = res_on_chain.copy()
     closeness_chain = closenessVals.copy()
 
-    # peaks using std as delta
     peaks_idx = []
     if closeness_chain.size > 0:
         v = closeness_chain
@@ -336,11 +369,8 @@ def main():
             except ValueError as e:
                 print("Peak detection warning:", e)
                 maxtab = np.empty((0, 2))
-
             if maxtab.size > 0:
                 peaks_idx = maxtab[:, 0].astype(int).tolist()
-        else:
-            maxtab = np.empty((0, 2))
 
     # Write peaks file
     with open(PEAKS_FILE, "w") as fid:
