@@ -6,7 +6,7 @@ save_dir: "/content"
 
 # Form defaults (optional)
 pdb_code: ""
-chain_id: "A"
+chain_id: ""
 email: ""
 
 # Dropdown options for Functional Residues mode (large path lengths)
