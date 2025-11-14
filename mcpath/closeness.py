@@ -271,9 +271,9 @@ def main():
     in_coorfile = _pick_latest(IN_COOR_BASE)
     work_dir = os.path.dirname(os.path.abspath(in_coorfile)) or "."
 
-    print("Using files:")
-    print(f"  path_file  -> {in_pathfile}")
-    print(f"  coor_file  -> {in_coorfile}")
+    # print("Using files:")
+    # print(f"  path_file  -> {in_pathfile}")
+    # print(f"  coor_file  -> {in_coorfile}")
 
     # ------------------------ Load data ------------------------
     seq = _load_path_first_row(in_pathfile)  # long path (float encoded as resid + chain/10)
@@ -515,7 +515,7 @@ def main():
         plt.savefig(PLOT_FILE, dpi=300, bbox_inches="tight")
         plt.close()
 
-        print(f"Saved closeness plot to '{PLOT_FILE}' and labels to '{LABELS_FILE}'.")
+        # print(f"Saved closeness plot to '{PLOT_FILE}' and labels to '{LABELS_FILE}'.")
     else:
         print("No residues for plotting / label export.")
 
