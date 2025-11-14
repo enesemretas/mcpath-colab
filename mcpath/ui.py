@@ -391,12 +391,12 @@ def launch(
                                 try:
                                     os.chdir(work_dir)
                                     print("▶ Running closeness (shortest paths + closeness centrality)…")
-                                    close_mod.main(chain_id=chain_global)
+                                    close_mod.main()
                                     print("✔ Wrote: shortest_paths_all_pairs_chain1")
                                     print("✔ Wrote: closeness_float")
 
                                     print("▶ Running betweenness centrality…")
-                                    betw_mod.main(chain_id=chain_global)
+                                    betw_mod.main()
                                     print("✔ Wrote: betweenness_float")
                                 finally:
                                     os.chdir(old_cwd)
