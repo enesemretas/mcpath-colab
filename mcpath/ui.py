@@ -381,9 +381,12 @@ def launch(
                                 print(f"   {atom_src} →  {atom_fixed}")
                                 print(f"   {path_src} →  {path_fixed}")
 
-                                # 3) Run closeness (shortest paths & centrality)
+                                # 3) Run closeness (shortest paths & centrality) + betweenness
                                 close_mod = importlib.import_module("mcpath.closeness")
                                 importlib.reload(close_mod)
+
+                                betw_mod = importlib.import_module("mcpath.betweenness")
+                                importlib.reload(betw_mod)
 
                                 try:
                                     os.chdir(work_dir)
@@ -391,8 +394,13 @@ def launch(
                                     close_mod.main(chain_id=chain_global)
                                     print("✔ Wrote: shortest_paths_all_pairs_chain1")
                                     print("✔ Wrote: closeness_float")
+
+                                    print("▶ Running betweenness centrality…")
+                                    betw_mod.main(chain_id=chain_global)
+                                    print("✔ Wrote: betweenness_float")
                                 finally:
                                     os.chdir(old_cwd)
+
 
                             except Exception as e_inf:
                                 print("❌ infinite/closeness pipeline failed:", e_inf)
