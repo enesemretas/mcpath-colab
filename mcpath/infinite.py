@@ -227,7 +227,7 @@ def infinite(ProteinName: str, path_length: int, pottype: str = "1"):
         path[0, counter - 1] = float(coor[row0, 0]) + float(coor[row0, 9]) / 10.0
 
         if counter % taban == 0:
-            print(f"Number of steps generated so far: {counter}")
+    #       print(f"Number of steps generated so far: {counter}")
 
     # ----- trim trailing zero columns (mirrors MATLAB, mostly no-op here) -----
     # MATLAB does a check for max(abs(path(:,pl+1-i)))~=0; here path has exactly
@@ -238,7 +238,7 @@ def infinite(ProteinName: str, path_length: int, pottype: str = "1"):
     # ----- write .path file -----
     out_name = f"{ProteinName}{Type}_{pl}steps_infinite.path"
     np.savetxt(out_name, path, fmt="%.10g", delimiter="\t")
-    print(f"Saved path to: {out_name}")
+    # print(f"Saved path to: {out_name}")
 
     # ----- stats block (same idea as MATLAB; optional) -----
     coor_enc = coor[:, 0] + coor[:, 9] / 10.0
