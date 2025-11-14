@@ -291,7 +291,6 @@ def readpdb_to_cor(pdb_path: str, chain: str, out_basename: Optional[str]=None, 
         for r in out_rows:
             f.write(f"{r[0]:5.0f} {r[1]:4.0f} {r[2]:8.3f} {r[3]:8.3f} {r[4]:8.3f} "
                     f"{r[5]:8.3f} {r[6]:8.3f} {r[7]:8.3f} {r[8]:4.0f} {r[9]:2.0f} {r[10]:4.1f}\n")
-    print(f"✔ Wrote: {out_path}")
     return out_path
 
 # ---------------- mcpath_input.txt parsing & runner ----------------
@@ -331,8 +330,6 @@ def run_from_input(input_path: str, base_dir: Optional[str]=None) -> str:
     pdb_path = pdb_name if os.path.isabs(pdb_name) else os.path.join(root, pdb_name)
     if not os.path.isfile(pdb_path):
         raise FileNotFoundError(f"PDB not found: {pdb_path}")
-    print(f"▶ Using input file: {input_path}")
-    print(f"   Mode={info['mode']}, PDB={pdb_path}, Chain='{chain or 'ALL'}'")
     return readpdb_to_cor(pdb_path, chain, out_basename=os.path.basename(pdb_name))
 
 # ---------------- Unified entrypoint (used by UI) ----------------
