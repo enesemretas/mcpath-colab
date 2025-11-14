@@ -8,9 +8,31 @@ _FORM_ROOT = None
 _LOG_OUT   = None
 
 # -------------------- validators & helpers --------------------
-def _is_valid_pdb_code(c): return bool(re.fullmatch(r"[0-9A-Za-z]{4}", c.strip()))
-def _is_valid_chain(ch):   return bool(re.fullmatch(r"[A-Za-z0-9]", ch.strip()))
-def _is_valid_email(s):    return (not s.strip()) or bool(re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", s.strip()))
+def _is_valid_pdb_code(c): 
+    return bool(re.fullmatch(r"[0-9A-Za-z]{4}", c.strip()))
+
+def _is_valid_chain(ch):
+    """Single-chain validator (for init/final chains etc.)."""
+    return bool(re.fullmatch(r"[A-Za-z0-9]", ch.strip()))
+
+def _is_valid_chain_list(ch_str: str) -> bool:
+    """
+    Validate a comma-separated list of chain IDs for the global Chain ID field.
+
+    Rules:
+      - Empty string -> valid (means: all chains).
+      - Otherwise: comma/whitespace-separated tokens, each must be a single [A-Za-z0-9].
+    """
+    ch_str = (ch_str or "").strip()
+    if not ch_str:
+        return True  # empty -> all chains
+    tokens = [t.strip() for t in re.split(r"[,\s]+", ch_str) if t.strip()]
+    if not tokens:
+        return True
+    return all(_is_valid_chain(tok) for tok in tokens)
+
+def _is_valid_email(s):    
+    return (not s.strip()) or bool(re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", s.strip()))
 
 def _fetch_rcsb(code: str) -> bytes:
     url = f"https://files.rcsb.org/download/{code.upper()}.pdb"
@@ -49,7 +71,7 @@ def _list_or_custom_row(label: str, options, default_value, minv, maxv, step=1):
     dropdown = W.Dropdown(options=options, value=default_value,
                           layout=W.Layout(width="280px", min_width="220px"))
     intbox   = W.BoundedIntText(value=default_value, min=minv, max=maxv, step=step,
-                                  layout=W.Layout(width="280px", min_width="220px"))
+                                layout=W.Layout(width="280px", min_width="220px"))
     value_box = W.Box([dropdown], layout=W.Layout(align_items="center"))
 
     def _on_mode(ch):
@@ -71,7 +93,7 @@ def _list_or_custom_row(label: str, options, default_value, minv, maxv, step=1):
 
     row = W.HBox([lbl, toggle, value_box], layout=W.Layout(align_items="center", gap="12px", width="auto"))
     return row, {'toggle': toggle, 'dropdown': dropdown, 'intbox': intbox,
-                  'get': get_value, 'set_list': set_list, 'set_custom': set_custom}
+                 'get': get_value, 'set_list': set_list, 'set_custom': set_custom}
 
 # -------------------- main UI --------------------
 def launch(
@@ -106,8 +128,13 @@ def launch(
             file_lbl.value = "No file chosen"
     pdb_upload.observe(_on_upload_change, names="value")
 
-    # Always-present fields
-    chain_id   = W.Text(value=str(cfg.get("chain_id", "")), description="Chain ID:",  layout=wide, style=DESC)
+    # Chain ID: now supports comma-separated list OR empty for "all chains"
+    chain_id = W.Text(
+        value=str(cfg.get("chain_id", "")),
+        description="Chain ID:",
+        placeholder="A or A,B (empty = all chains)",
+        layout=wide, style=DESC
+    )
     email      = W.Text(value=str(cfg.get("email", "")),   description="Email (opt):", layout=wide, style=DESC)
 
     # Prediction type
@@ -149,7 +176,7 @@ def launch(
     # ---------- Mode 3 ----------
     final_idx_default = 1
     final_idx   = W.BoundedIntText(value=final_idx_default, min=1, max=1_000_000, step=1,
-                                    description="Index of final residue:", layout=wide, style=DESC)
+                                   description="Index of final residue:", layout=wide, style=DESC)
     final_chain_default = ""
     final_chain = W.Text(value=final_chain_default, description="Chain of final residue:", placeholder="B", layout=wide, style=DESC)
 
@@ -207,7 +234,6 @@ def launch(
 
     # -------------------- handlers --------------------
 
-    # --- HARD RESET & RERUN: rebuilds the entire UI fresh (including upload) ---
     def on_new_job(_):
         global _FORM_ROOT, _LOG_OUT
         try:
@@ -217,7 +243,7 @@ def launch(
             pass
         try:
             if _FORM_ROOT:
-                _FORM_ROOT.close()  # remove old widget tree from front-end
+                _FORM_ROOT.close()
         except Exception:
             pass
 
@@ -252,7 +278,6 @@ def launch(
         if not os.path.exists(dst):
             shutil.copyfile(src_path, dst)
             return dst
-        # add _1, _2, ...
         k = 1
         while True:
             cand = f"{dst}_{k}"
@@ -262,19 +287,23 @@ def launch(
             k += 1
 
     def on_submit(_):
-        _LOG_OUT.clear_output(wait=True)  # always clear the shared area first
+        _LOG_OUT.clear_output(wait=True)
         with _LOG_OUT:
             try:
-                chain_global = chain_id.value.strip()
-                if not _is_valid_chain(chain_global):
-                    raise ValueError("Chain ID must be a single character (e.g., A).")
+                # Global chain(s): allow empty or comma-separated list
+                chain_global_raw = chain_id.value.strip()
+                if chain_global_raw and (not _is_valid_chain_list(chain_global_raw)):
+                    raise ValueError("Chain ID must be empty (all chains) or a comma-separated list of single characters (e.g., A or A,B).")
+                chain_global = chain_global_raw  # may be ""
+
                 if not _is_valid_email(email.value.strip()):
                     raise ValueError("Invalid email format.")
 
                 pdb_bytes, pdb_name = _collect_pdb_bytes()
 
                 save_path = os.path.join(SAVE_DIR, pdb_name)
-                with open(save_path, "wb") as f: f.write(pdb_bytes)
+                with open(save_path, "wb") as f:
+                    f.write(pdb_bytes)
                 print(f"Saved local copy: {save_path}")
 
                 input_path = os.path.join(os.path.dirname(save_path), "mcpath_input.txt")
@@ -297,10 +326,11 @@ def launch(
                             (email.value.strip() or "-")]
 
                 with open(input_path, "w") as f:
-                    for r in rows: f.write(str(r).strip() + "\n")
+                    for r in rows:
+                        f.write(str(r).strip() + "\n")
                 print(f"Input file saved: {input_path}")
                 print(f"▶ Using input file: {input_path}")
-                print(f"    Mode={mode}, PDB={save_path}, Chain={chain_global}")
+                print(f"    Mode={mode}, PDB={save_path}, Chain(s)='{chain_global or 'ALL'}'")
 
                 run_readpdb = _try_import_readpdb()
                 cor_path = None
@@ -310,7 +340,8 @@ def launch(
                     try:
                         cor_path = run_readpdb(input_path=input_path)
                     except TypeError:
-                        cor_path = run_readpdb(pdb_path=save_path, chain=chain_global)
+                        # Fallback to direct mode (rare)
+                        cor_path = run_readpdb(pdb_path=save_path, chain=(chain_global or "A"))
                     print(f"✔ Wrote: {cor_path}")
                     print(f"✔ COR written: {cor_path}")
                     print(f"    COR exists? {os.path.isfile(cor_path)}\n")
@@ -337,7 +368,8 @@ def launch(
 
                         pkg_dir = os.path.dirname(os.path.abspath(__file__))
                         root_dir = os.path.dirname(pkg_dir)
-                        if root_dir not in sys.path: sys.path.append(root_dir)
+                        if root_dir not in sys.path:
+                            sys.path.append(root_dir)
 
                         atom_mod = importlib.import_module("mcpath.atomistic")
                         importlib.reload(atom_mod)
@@ -348,10 +380,9 @@ def launch(
                                                   rcut=5.0, kT=1.0, save_txt=True)
                         print(f"✔ Saved probability matrix: {base_for_atom}_atomistic.out")
 
-                        # If mode == functional, run infinite.py and copy to fixed names, then run closeness.py
+                        # If mode == functional, run infinite.py and copy to fixed names, then run closeness.py & betweenness.py
                         if mode == "functional":
                             try:
-                                # 1) Run infinite (long path generator)
                                 inf_mod = importlib.import_module("mcpath.infinite")
                                 importlib.reload(inf_mod)
 
@@ -368,7 +399,6 @@ def launch(
                                 finally:
                                     os.chdir(old_cwd)
 
-                                # 2) Copy sources to fixed names (with auto-suffix if exist)
                                 cor_src  = f"{base_for_atom}.cor"
                                 atom_src = f"{base_for_atom}_atomistic.out"
 
@@ -376,12 +406,11 @@ def launch(
                                 atom_fixed = _copy_unique(atom_src, "atom_file", work_dir=os.path.dirname(atom_src))
                                 path_fixed = _copy_unique(path_src, "path_file", work_dir=os.path.dirname(path_src))
 
-                                print(f"✔ Fixed copies:")
+                                print("✔ Fixed copies:")
                                 print(f"   {cor_src}  →  {coor_fixed}")
                                 print(f"   {atom_src} →  {atom_fixed}")
                                 print(f"   {path_src} →  {path_fixed}")
 
-                                # 3) Run closeness (shortest paths & centrality) + betweenness
                                 close_mod = importlib.import_module("mcpath.closeness")
                                 importlib.reload(close_mod)
 
@@ -401,7 +430,6 @@ def launch(
                                 finally:
                                     os.chdir(old_cwd)
 
-
                             except Exception as e_inf:
                                 print("❌ infinite/closeness pipeline failed:", e_inf)
 
@@ -410,7 +438,7 @@ def launch(
                 except Exception as e:
                     print("❌ atomistic run failed:", e)
 
-                # (Submission preview / POST unchanged)
+                # ----- Submission payload to remote server (unchanged except chain_global) -----
                 data = {"prediction_mode": mode, FN["chain_id"]: chain_global}
                 if pdb_code.value.strip():
                     data[FN["pdb_code"]] = pdb_code.value.strip().upper()
@@ -440,8 +468,10 @@ def launch(
                 print(f"Submitting to {target_url} …")
                 r = requests.post(target_url, data=data, files=files, timeout=180)
                 print("HTTP", r.status_code)
-                try: print("JSON:", r.json())
-                except Exception: print("Response (≤800 chars):\n", r.text[:800])
+                try:
+                    print("JSON:", r.json())
+                except Exception:
+                    print("Response (≤800 chars):\n", r.text[:800])
 
             except Exception as e:
                 print("❌", e)
