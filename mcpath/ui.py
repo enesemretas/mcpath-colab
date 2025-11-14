@@ -52,6 +52,13 @@ def _logo_widget(branding: dict):
     except Exception:
         return None
 
+def _progress(step: int, total: int, message: str):
+    """
+    Minimal progress message helper.
+    Example: [1/5] Input validated and PDB saved.
+    """
+    print(f"[{step}/{total}] {message}")
+
 # --- Single row: "<Label> : [List | Custom]  <value-widget>"
 def _list_or_custom_row(label: str, options, default_value, minv, maxv, step=1):
     options = sorted({int(x) for x in options})
@@ -290,7 +297,9 @@ def launch(
         _LOG_OUT.clear_output(wait=True)
         with _LOG_OUT:
             try:
-                # Global chain(s): allow empty or comma-separated list
+                total_steps = 5
+
+                # -------- Step 1: validate inputs + save PDB --------
                 chain_global_raw = chain_id.value.strip()
                 if chain_global_raw and (not _is_valid_chain_list(chain_global_raw)):
                     raise ValueError("Chain ID must be empty (all chains) or a comma-separated list of single characters (e.g., A or A,B).")
@@ -300,11 +309,9 @@ def launch(
                     raise ValueError("Invalid email format.")
 
                 pdb_bytes, pdb_name = _collect_pdb_bytes()
-
                 save_path = os.path.join(SAVE_DIR, pdb_name)
                 with open(save_path, "wb") as f:
                     f.write(pdb_bytes)
-                print(f"Saved local copy: {save_path}")
 
                 input_path = os.path.join(os.path.dirname(save_path), "mcpath_input.txt")
                 mode = pred_type.value
@@ -328,117 +335,113 @@ def launch(
                 with open(input_path, "w") as f:
                     for r in rows:
                         f.write(str(r).strip() + "\n")
-                print(f"Input file saved: {input_path}")
-                print(f"▶ Using input file: {input_path}")
-                print(f"    Mode={mode}, PDB={save_path}, Chain(s)='{chain_global or 'ALL'}'")
 
+                _progress(1, total_steps, "Input validated and PDB saved.")
+
+                # -------- Step 2: generate .cor via readpdb_strict --------
                 run_readpdb = _try_import_readpdb()
                 cor_path = None
                 if run_readpdb is None:
-                    print("ℹ️ readpdb_strict not found; skipping .cor generation.")
+                    print("Warning: readpdb_strict not found; skipping .cor generation.")
                 else:
                     try:
                         cor_path = run_readpdb(input_path=input_path)
                     except TypeError:
                         # Fallback to direct mode (rare)
                         cor_path = run_readpdb(pdb_path=save_path, chain=(chain_global or "A"))
-                    print(f"✔ Wrote: {cor_path}")
-                    print(f"✔ COR written: {cor_path}")
-                    print(f"    COR exists? {os.path.isfile(cor_path)}\n")
-                    try:
-                        with open(cor_path, "r") as f:
-                            head = "".join([next(f) for _ in range(5)])
-                        print("First lines of COR:\n" + head)
-                    except Exception:
-                        pass
+                    if cor_path and os.path.isfile(cor_path):
+                        _progress(2, total_steps, ".cor coordinate file generated.")
+                    else:
+                        print("Warning: .cor file was not generated or not found.")
 
+                # -------- Step 3: atomistic LJ --------
                 try:
                     if cor_path and os.path.isfile(cor_path):
                         base_no_ext = os.path.splitext(save_path)[0]
                         want_cor = f"{base_no_ext}.cor"
                         if os.path.abspath(cor_path) != os.path.abspath(want_cor):
                             shutil.copyfile(cor_path, want_cor)
-                        print(f"↪ Copied COR to: {want_cor} (for atomistic)")
 
                         here = os.path.dirname(os.path.abspath(__file__))
                         param_path = os.path.join(here, "vdw_cns.param")
                         top_path   = os.path.join(here, "pdb_cns.top")
-                        print(f"    param_path: {param_path} exists? {os.path.isfile(param_path)}")
-                        print(f"    top_path:   {top_path} exists? {os.path.isfile(top_path)}")
 
-                        pkg_dir = os.path.dirname(os.path.abspath(__file__))
-                        root_dir = os.path.dirname(pkg_dir)
-                        if root_dir not in sys.path:
-                            sys.path.append(root_dir)
+                        if not (os.path.isfile(param_path) and os.path.isfile(top_path)):
+                            print("Warning: vdw_cns.param or pdb_cns.top missing; skipping atomistic LJ step.")
+                        else:
+                            pkg_dir = os.path.dirname(os.path.abspath(__file__))
+                            root_dir = os.path.dirname(pkg_dir)
+                            if root_dir not in sys.path:
+                                sys.path.append(root_dir)
 
-                        atom_mod = importlib.import_module("mcpath.atomistic")
-                        importlib.reload(atom_mod)
+                            atom_mod = importlib.import_module("mcpath.atomistic")
+                            importlib.reload(atom_mod)
 
-                        base_for_atom = os.path.splitext(save_path)[0]
-                        print(f"▶ Running atomistic LJ on base: {base_for_atom}")
-                        norm = atom_mod.atomistic(base_for_atom, param_file=param_path, top_file=top_path,
-                                                  rcut=5.0, kT=1.0, save_txt=True)
-                        print(f"✔ Saved probability matrix: {base_for_atom}_atomistic.out")
-
-                        # If mode == functional, run infinite.py and copy to fixed names, then run closeness.py & betweenness.py
-                        if mode == "functional":
-                            try:
-                                inf_mod = importlib.import_module("mcpath.infinite")
-                                importlib.reload(inf_mod)
-
-                                work_dir = os.path.dirname(save_path)
-                                old_cwd = os.getcwd()
-                                try:
-                                    os.chdir(work_dir)
-                                    steps = int(get_big_len())
-                                    print(f"▶ Running infinite path generator: ProteinName={os.path.basename(base_for_atom)}, steps={steps}")
-                                    path_arr = inf_mod.infinite(os.path.basename(base_for_atom), path_length=steps, pottype='1')
-                                    pl = path_arr.shape[1]
-                                    path_src = f"{os.path.basename(base_for_atom)}_atomistic_{pl}steps_infinite.path"
-                                    path_src = os.path.join(work_dir, path_src)
-                                finally:
-                                    os.chdir(old_cwd)
-
-                                cor_src  = f"{base_for_atom}.cor"
-                                atom_src = f"{base_for_atom}_atomistic.out"
-
-                                coor_fixed = _copy_unique(cor_src,  "coor_file", work_dir=os.path.dirname(cor_src))
-                                atom_fixed = _copy_unique(atom_src, "atom_file", work_dir=os.path.dirname(atom_src))
-                                path_fixed = _copy_unique(path_src, "path_file", work_dir=os.path.dirname(path_src))
-
-                                print("✔ Fixed copies:")
-                                print(f"   {cor_src}  →  {coor_fixed}")
-                                print(f"   {atom_src} →  {atom_fixed}")
-                                print(f"   {path_src} →  {path_fixed}")
-
-                                close_mod = importlib.import_module("mcpath.closeness")
-                                importlib.reload(close_mod)
-
-                                betw_mod = importlib.import_module("mcpath.betweenness")
-                                importlib.reload(betw_mod)
-
-                                try:
-                                    os.chdir(work_dir)
-                                    print("▶ Running closeness (shortest paths + closeness centrality)…")
-                                    close_mod.main()
-                                    print("✔ Wrote: shortest_paths_all_pairs_chain1")
-                                    print("✔ Wrote: closeness_float")
-
-                                    print("▶ Running betweenness centrality…")
-                                    betw_mod.main()
-                                    print("✔ Wrote: betweenness_float")
-                                finally:
-                                    os.chdir(old_cwd)
-
-                            except Exception as e_inf:
-                                print("❌ infinite/closeness pipeline failed:", e_inf)
-
+                            base_for_atom = os.path.splitext(save_path)[0]
+                            atom_mod.atomistic(
+                                base_for_atom,
+                                param_file=param_path,
+                                top_file=top_path,
+                                rcut=5.0,
+                                kT=1.0,
+                                save_txt=True
+                            )
+                            _progress(3, total_steps, "Atomistic LJ calculation completed.")
                     else:
-                        print("ℹ️ No .cor available; skipping atomistic LJ step.")
+                        print("Warning: No .cor available; skipping atomistic LJ step.")
                 except Exception as e:
-                    print("❌ atomistic run failed:", e)
+                    print(f"Warning: atomistic run failed: {e}")
 
-                # ----- Submission payload to remote server (unchanged except chain_global) -----
+                # -------- Step 4: infinite path + closeness/betweenness --------
+                if mode == "functional" and cor_path and os.path.isfile(cor_path):
+                    try:
+                        inf_mod = importlib.import_module("mcpath.infinite")
+                        importlib.reload(inf_mod)
+
+                        work_dir = os.path.dirname(save_path)
+                        old_cwd = os.getcwd()
+                        try:
+                            os.chdir(work_dir)
+                            steps = int(get_big_len())
+                            path_arr = inf_mod.infinite(
+                                os.path.basename(os.path.splitext(save_path)[0]),
+                                path_length=steps,
+                                pottype='1'
+                            )
+                            pl = path_arr.shape[1]
+                            path_src = f"{os.path.basename(os.path.splitext(save_path)[0])}_atomistic_{pl}steps_infinite.path"
+                            path_src = os.path.join(work_dir, path_src)
+                        finally:
+                            os.chdir(old_cwd)
+
+                        cor_src  = f"{os.path.splitext(save_path)[0]}.cor"
+                        atom_src = f"{os.path.splitext(save_path)[0]}_atomistic.out"
+
+                        coor_fixed = _copy_unique(cor_src,  "coor_file", work_dir=os.path.dirname(cor_src))
+                        atom_fixed = _copy_unique(atom_src, "atom_file", work_dir=os.path.dirname(atom_src))
+                        path_fixed = _copy_unique(path_src, "path_file", work_dir=os.path.dirname(path_src))
+
+                        close_mod = importlib.import_module("mcpath.closeness")
+                        importlib.reload(close_mod)
+
+                        betw_mod = importlib.import_module("mcpath.betweenness")
+                        importlib.reload(betw_mod)
+
+                        old_cwd2 = os.getcwd()
+                        try:
+                            os.chdir(work_dir)
+                            close_mod.main()
+                            betw_mod.main()
+                        finally:
+                            os.chdir(old_cwd2)
+
+                        _progress(4, total_steps, "Path generation and centrality analysis completed.")
+                    except Exception as e_inf:
+                        print(f"Warning: infinite/closeness pipeline failed: {e_inf}")
+                elif mode == "functional":
+                    print("Warning: Skipping path/centrality analysis (missing .cor or earlier failure).")
+
+                # -------- Step 5: remote submission (if configured) --------
                 data = {"prediction_mode": mode, FN["chain_id"]: chain_global}
                 if pdb_code.value.strip():
                     data[FN["pdb_code"]] = pdb_code.value.strip().upper()
@@ -447,34 +450,34 @@ def launch(
                 if mode == "functional":
                     data[FN["path_length"]] = str(get_big_len())
                 elif mode == "paths_init_len":
-                    data.update({"length_paths": int(get_short_len()),
-                                 "number_paths": int(get_num_paths_2()),
-                                 "index_initial": int(init_idx.value),
-                                 "chain_initial": (init_chain.value or "").strip()})
+                    data.update({
+                        "length_paths": int(get_short_len()),
+                        "number_paths": int(get_num_paths_2()),
+                        "index_initial": int(init_idx.value),
+                        "chain_initial": (init_chain.value or "").strip()
+                    })
                 else:
-                    data.update({"index_initial": int(init_idx.value),
-                                 "chain_initial": (init_chain.value or "").strip(),
-                                 "index_final": int(final_idx.value),
-                                 "chain_final": (final_chain.value or "").strip(),
-                                 "number_paths": int(get_num_paths_3())})
+                    data.update({
+                        "index_initial": int(init_idx.value),
+                        "chain_initial": (init_chain.value or "").strip(),
+                        "index_final": int(final_idx.value),
+                        "chain_final": (final_chain.value or "").strip(),
+                        "number_paths": int(get_num_paths_3())
+                    })
 
                 files = {FN["pdb_file"]: (pdb_name, pdb_bytes, "chemical/x-pdb")}
                 if not target_url:
-                    print("\n(No target_url set) — preview only payload below:\n")
-                    preview = dict(data); preview["attached_file"] = pdb_name
-                    print(preview)
+                    _progress(5, total_steps, "Local processing completed (no remote submission configured).")
                     return
 
-                print(f"Submitting to {target_url} …")
-                r = requests.post(target_url, data=data, files=files, timeout=180)
-                print("HTTP", r.status_code)
                 try:
-                    print("JSON:", r.json())
-                except Exception:
-                    print("Response (≤800 chars):\n", r.text[:800])
+                    r = requests.post(target_url, data=data, files=files, timeout=180)
+                    _progress(5, total_steps, f"Remote submission completed (HTTP {r.status_code}).")
+                except Exception as e_sub:
+                    print(f"Warning: remote submission failed: {e_sub}")
 
             except Exception as e:
-                print("❌", e)
+                print("Error:", e)
 
     btn_new_job.on_click(on_new_job)
     btn_submit.on_click(on_submit)
