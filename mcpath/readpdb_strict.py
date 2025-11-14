@@ -104,6 +104,13 @@ def _stable_unique(seq):
             out.append(x); seen.add(x)
     return out
 
+def _chain_rank(all_atoms, req_chain):
+    chains = _stable_unique([a["chainID"] for a in all_atoms if a["chainID"]])
+    try:
+        return chains.index(req_chain.upper())+1
+    except ValueError:
+        return None
+
 def _avg(coords):
     n = len(coords)
     if n==0: return (0.0,0.0,0.0)
@@ -166,6 +173,9 @@ def _sidechain_centroid_by_rule(rescode: int, per_res_atoms: List[Dict], ca_xyz)
     return ca_xyz
 
 # ---------------- Core converter ----------------
+def _rename_res(resname: str) -> str:
+    return RESNAME_REMAP.get(resname.upper(), resname.upper())
+
 def readpdb_to_cor(pdb_path: str, chain: str, out_basename: Optional[str]=None, strict_matlab_mode: bool=True) -> str:
     chain = (chain or "").strip().upper()
     if len(chain)!=1:
@@ -179,25 +189,9 @@ def readpdb_to_cor(pdb_path: str, chain: str, out_basename: Optional[str]=None, 
     if not atoms_all:
         raise RuntimeError("No atoms parsed from PDB.")
 
-    # -------- NEW: build a stable chain map based on appearance order --------
-    # Example: if atoms_all contains chains in order R, R, A, A, ...
-    # then chains = ['R', 'A'] and chain_map = {'R': 1, 'A': 2}
-    chains = _stable_unique([a["chainID"] for a in atoms_all if a["chainID"]])
-    if not chains:
-        raise RuntimeError("No chain IDs found in PDB.")
-    chain_map = {ch: (i+1) for i, ch in enumerate(chains)}
+    rank_req = _chain_rank(atoms_all, chain)
 
-    if chain not in chain_map:
-        raise ValueError(f"Requested chain '{chain}' not found in PDB. "
-                         f"Available chains: {', '.join(chains)}")
-
-    # numeric chain number (1..N) corresponding to the letter the user requested
-    rank_req = chain_map[chain]
-
-    # (optional) debug print:
-    # print("Chain mapping:", ", ".join(f"{ch}->{chain_map[ch]}" for ch in chains))
-
-    # ---------------- Clean atoms (drop hydrogens; altLoc; remap resnames) ----------------
+    # Clean (drop hydrogens; simple altLoc filter; rename residues)
     cleaned = []
     i = 0
     while i < len(atoms_all):
@@ -222,10 +216,9 @@ def readpdb_to_cor(pdb_path: str, chain: str, out_basename: Optional[str]=None, 
     # Group by (chain,resSeq)
     res_blocks = defaultdict(list)
     for at in cleaned:
-        res_blocks[(at["chainID"], at["resSeq"])] = res_blocks[(at["chainID"], at["resSeq"])] + [at]
+        res_blocks[(at["chainID"], at["resSeq"])].append(at)
 
     out_rows = []
-    # sort first by chainID (letter), then by residue sequence number
     for (chainID, resSeq) in sorted(res_blocks.keys(), key=lambda t: (t[0], t[1])):
         perres = res_blocks[(chainID, resSeq)]
         resname = _rename_res(perres[0]["resName"])
@@ -237,8 +230,7 @@ def readpdb_to_cor(pdb_path: str, chain: str, out_basename: Optional[str]=None, 
         CAxyz = (CA["X"], CA["Y"], CA["Z"])
         SCxyz = _sidechain_centroid_by_rule(rescode, perres, CAxyz)
         mass  = RES_MASS.get(rescode, 0.0)
-        # use our chain_map to assign numeric chain index
-        chain_rank_val = chain_map.get(chainID, 0)
+        chain_rank_val = _chain_rank(atoms_all, chainID) or 1
         out_rows.append((
             int(resSeq),
             int(rescode),
@@ -249,8 +241,9 @@ def readpdb_to_cor(pdb_path: str, chain: str, out_basename: Optional[str]=None, 
             float(mass)
         ))
 
-    # keep only requested chain (by numeric rank)
-    out_rows = [r for r in out_rows if r[9] == rank_req]
+    # keep only requested chain (by rank)
+    if rank_req is not None:
+        out_rows = [r for r in out_rows if r[9] == rank_req]
 
     # copy CA to SC if SC is zero (MATLAB fallback)
     fixed = []
@@ -270,7 +263,7 @@ def readpdb_to_cor(pdb_path: str, chain: str, out_basename: Optional[str]=None, 
     print(f"✔ Wrote: {out_path}")
     return out_path
 
-# ---------------- mcpath_input.txt parsing & runner (unchanged) ----------------
+# ---------------- mcpath_input.txt parsing & runner ----------------
 def _find_default_input_candidates(start_dir: Optional[str]) -> List[str]:
     cands = []
     if start_dir:
