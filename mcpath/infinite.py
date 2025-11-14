@@ -226,7 +226,7 @@ def infinite(ProteinName: str, path_length: int, pottype: str = "1"):
         row0 = startres - 1
         path[0, counter - 1] = float(coor[row0, 0]) + float(coor[row0, 9]) / 10.0
 
-        if counter % taban == 0:
+            #if counter % taban == 0:
     #       print(f"Number of steps generated so far: {counter}")
 
     # ----- trim trailing zero columns (mirrors MATLAB, mostly no-op here) -----
