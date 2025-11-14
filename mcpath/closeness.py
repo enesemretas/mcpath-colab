@@ -3,7 +3,7 @@
 # ---------------------------------------------------------------
 # - Reads latest path_file[_N] and coor_file[_N] in current dir
 # - path_file: first row is a long path of encoded nodes v = resID + chainID/10
-# - coor_file: columns 1=resID, 10=chainID (numeric)
+# - coor_file: columns 1=resID, 10=chainID (numeric rank, as assigned by readpdb_strict)
 # - Distance l_ij = minimal number of steps along this path from i to j
 #                    (index difference q - p, with q > p)
 # - Closeness (for all residues present in both .cor and path):
@@ -13,17 +13,19 @@
 #   * shortest_paths_all_pairs_chain1 : rows [start end distance nodes...]
 #   * closeness_float                  : "  xx.x\t0.xxxxxx"
 #   * closeness_peaks                  : peak residues from closeness profile
-#   * closeness_chain_labels.txt       : "'12A' , 0.096112" style
+#   * closeness_chain_labels.txt       : "'12A' , 0.096112" style (using PDB chain IDs)
 #   * closeness_chain_plot.png         : profile + peaks
 
 import os
 import re
+from collections import defaultdict
+
 import numpy as np
 import matplotlib.pyplot as plt
 
 # --------------------------- configuration ---------------------------
 IN_PATH_BASE = "path_file"      # tab-separated; first row = long path
-IN_COOR_BASE = "coor_file"      # numeric; col1=resID, col10=chainID
+IN_COOR_BASE = "coor_file"      # numeric; col1=resID, col10=chainID (numeric rank)
 
 PATHS_FILE      = "shortest_paths_all_pairs_chain1"
 CLOSENESS_FILE  = "closeness_float"
@@ -55,6 +57,78 @@ def _pick_latest(basename: str, directory: str = ".") -> str:
             f"No file found for base '{basename}' (including numbered variants)."
         )
     return os.path.join(directory, best)
+
+
+def _find_latest_pdb(directory: str = ".") -> str | None:
+    """
+    Find the most recently modified .pdb file in `directory`.
+    Returns its full path, or None if none found.
+    """
+    pdb_files = [f for f in os.listdir(directory) if f.lower().endswith(".pdb")]
+    if not pdb_files:
+        return None
+    pdb_files_full = [os.path.join(directory, f) for f in pdb_files]
+    pdb_files_full.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+    return pdb_files_full[0]
+
+
+def _build_chain_mapping_from_pdb(coor: np.ndarray, directory: str = ".") -> dict[int, str]:
+    """
+    Build mapping from numeric chain ID (as stored in .cor/.coor) to actual
+    chain letter in the PDB, using the order of first appearance in the PDB.
+
+    Steps:
+    - Find latest .pdb in `directory`.
+    - Read lines starting with ATOM/HETATM.
+    - Extract chainID at column 22 (PDB 1-based indexing).
+    - Take unique chain IDs in order of first appearance → list of letters.
+    - Numeric chain IDs in coor (1..N) are mapped to this list:
+          1 -> first letter, 2 -> second, ...
+    If anything fails, fall back to mapping k -> str(k).
+    """
+    # numeric chain IDs present in coor
+    chain_nums = sorted(set(coor[:, 9].astype(int)))
+
+    pdb_path = _find_latest_pdb(directory)
+    if pdb_path is None:
+        # Safe fallback: no PDB → use numeric IDs as strings
+        return {k: str(k) for k in chain_nums}
+
+    chain_letters_ordered: list[str] = []
+    seen = set()
+
+    try:
+        with open(pdb_path, "r") as f:
+            for line in f:
+                if not (line.startswith("ATOM") or line.startswith("HETATM")):
+                    continue
+                if len(line) < 22:
+                    continue
+                ch = line[21].strip()  # column 22 in 1-based indexing
+                if not ch:
+                    continue
+                if ch not in seen:
+                    seen.add(ch)
+                    chain_letters_ordered.append(ch)
+    except Exception:
+        # If reading/parsing PDB fails, fall back to numeric-as-string
+        return {k: str(k) for k in chain_nums}
+
+    if not chain_letters_ordered:
+        # No chain letters parsed → fallback
+        return {k: str(k) for k in chain_nums}
+
+    # Now build the mapping: numeric rank (as used in .cor) → actual chain letter
+    mapping: dict[int, str] = {}
+    for k in chain_nums:
+        # ranks are 1-based; if out of range, fallback to numeric string
+        idx = k - 1
+        if 0 <= idx < len(chain_letters_ordered):
+            mapping[k] = chain_letters_ordered[idx]
+        else:
+            mapping[k] = str(k)
+
+    return mapping
 
 
 def _load_path_first_row(pathfile: str) -> np.ndarray:
@@ -195,6 +269,7 @@ def main():
     # --- pick latest files ---
     in_pathfile = _pick_latest(IN_PATH_BASE)
     in_coorfile = _pick_latest(IN_COOR_BASE)
+    work_dir = os.path.dirname(os.path.abspath(in_coorfile)) or "."
 
     print("Using files:")
     print(f"  path_file  -> {in_pathfile}")
@@ -206,6 +281,9 @@ def main():
     assert n >= 2, "Path too short."
 
     coor = _load_coor_matrix(in_coorfile)
+
+    # Build mapping numeric_chainID -> actual chain letter from PDB
+    chain_map = _build_chain_mapping_from_pdb(coor, directory=work_dir)
 
     # From coor_file: residue & chain (numeric)
     resID_cor  = coor[:, 0].astype(int)
@@ -220,7 +298,6 @@ def main():
     seq_keys = np.round(seq * 10.0).astype(int)
 
     # Build position list for all nodes appearing in the path
-    from collections import defaultdict
     pos_dict_all = defaultdict(list)
     for idx, k in enumerate(seq_keys):
         pos_dict_all[k].append(idx)
@@ -380,10 +457,7 @@ def main():
     if res_int_all.size > 0:
         labels = []
         for r, c in zip(res_int_all, chain_int_all):
-            if 1 <= c <= 26:
-                ch = chr(ord("A") + c - 1)
-            else:
-                ch = str(c)
+            ch = chain_map.get(c, str(c))
             labels.append(f"{r}{ch}")
 
         # Text file: '12A' , 0.096112
@@ -421,10 +495,7 @@ def main():
     if peaks_idx:
         print("Peak residues (resID + chain):")
         for idx in peaks_idx:
-            if 1 <= chain_int_all[idx] <= 26:
-                ch = chr(ord("A") + chain_int_all[idx] - 1)
-            else:
-                ch = str(chain_int_all[idx])
+            ch = chain_map.get(chain_int_all[idx], str(chain_int_all[idx]))
             print(
                 f"  {res_int_all[idx]}{ch}  -> closeness = {closeness_all[idx]:.6f}"
             )
