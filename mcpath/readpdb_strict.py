@@ -12,6 +12,13 @@ Behavior:
     mode=3 : paths_init_final → [3, pdb_name, chain, idx_i, chain_i, idx_f, chain_f, email]
   Only (pdb_name, chain) are needed for .cor creation; others are ignored here.
 - If no input file is found, falls back to direct arguments (pdb_path, chain).
+
+Chain semantics (updated):
+- chain may be:
+    "" (empty)         → use ALL chains.
+    "A"                → only chain A (by rank).
+    "A,B" or "A,B,C"   → only those chains (by rank).
+- If the PDB has no chain IDs at all, ALL residues are used regardless of chain.
 - Writes "<pdb_name>.cor" next to the PDB and returns the .cor path.
 """
 
@@ -173,13 +180,18 @@ def _sidechain_centroid_by_rule(rescode: int, per_res_atoms: List[Dict], ca_xyz)
     return ca_xyz
 
 # ---------------- Core converter ----------------
-def _rename_res(resname: str) -> str:
-    return RESNAME_REMAP.get(resname.upper(), resname.upper())
-
 def readpdb_to_cor(pdb_path: str, chain: str, out_basename: Optional[str]=None, strict_matlab_mode: bool=True) -> str:
-    chain = (chain or "").strip().upper()
-    if len(chain)!=1:
-        raise ValueError("chain must be a single letter, e.g., 'A'.")
+    """
+    Convert PDB to .cor.
+
+    chain string semantics:
+      ""           -> all chains
+      "A"          -> only chain A (by rank)
+      "A,B"        -> chains A and B (by rank)
+      "A,B,C" ...  -> multiple
+    If PDB has NO chain IDs, all residues are kept regardless of chain.
+    """
+    chain_raw = (chain or "").strip().upper()
 
     with open(pdb_path, "r") as f:
         raw = f.read().splitlines()
@@ -189,7 +201,26 @@ def readpdb_to_cor(pdb_path: str, chain: str, out_basename: Optional[str]=None, 
     if not atoms_all:
         raise RuntimeError("No atoms parsed from PDB.")
 
-    rank_req = _chain_rank(atoms_all, chain)
+    # Detect if PDB has any chain IDs at all
+    has_any_chain = any(a["chainID"] for a in atoms_all)
+
+    # Determine allowed chain ranks (or None for "all")
+    allowed_ranks = None
+    if has_any_chain and chain_raw:
+        tokens = [t.strip() for t in re.split(r"[,\s]+", chain_raw) if t.strip()]
+        ranks: List[int] = []
+        for tk in tokens:
+            rk = _chain_rank(atoms_all, tk)
+            if rk is not None and rk not in ranks:
+                ranks.append(rk)
+        if ranks:
+            allowed_ranks = set(ranks)
+        else:
+            # Requested chain(s) not found → fall back to ALL chains
+            allowed_ranks = None
+    else:
+        # Either no chain IDs in PDB or empty chain string: use ALL residues
+        allowed_ranks = None
 
     # Clean (drop hydrogens; simple altLoc filter; rename residues)
     cleaned = []
@@ -216,7 +247,7 @@ def readpdb_to_cor(pdb_path: str, chain: str, out_basename: Optional[str]=None, 
     # Group by (chain,resSeq)
     res_blocks = defaultdict(list)
     for at in cleaned:
-        res_blocks[(at["chainID"], at["resSeq"])].append(at)
+        res_blocks[(at["chainID"], at["resSeq"])] .append(at)
 
     out_rows = []
     for (chainID, resSeq) in sorted(res_blocks.keys(), key=lambda t: (t[0], t[1])):
@@ -241,9 +272,9 @@ def readpdb_to_cor(pdb_path: str, chain: str, out_basename: Optional[str]=None, 
             float(mass)
         ))
 
-    # keep only requested chain (by rank)
-    if rank_req is not None:
-        out_rows = [r for r in out_rows if r[9] == rank_req]
+    # Filter by allowed_ranks if any
+    if allowed_ranks is not None:
+        out_rows = [r for r in out_rows if r[9] in allowed_ranks]
 
     # copy CA to SC if SC is zero (MATLAB fallback)
     fixed = []
@@ -272,7 +303,6 @@ def _find_default_input_candidates(start_dir: Optional[str]) -> List[str]:
         os.path.join(os.getcwd(), "mcpath_input.txt"),
         "/content/mcpath_input.txt",
     ]
-    # keep unique preserving order
     seen=set(); out=[]
     for p in cands:
         if p not in seen:
@@ -286,13 +316,10 @@ def parse_mcpath_input(input_path: str) -> Dict[str,str]:
         raise ValueError("mcpath_input.txt malformed: first line must be mode 1/2/3")
     mode = int(lines[0])
     if mode == 1 and len(lines) >= 3:
-        # [1, pdb_name, chain, path_len, email?]
         return {"mode": "functional", "pdb_name": lines[1], "chain": lines[2]}
     if mode == 2 and len(lines) >= 8:
-        # [2, pdb_name, chain, L, N, idx_init, chain_init, email]
         return {"mode": "paths_init_len", "pdb_name": lines[1], "chain": lines[2]}
     if mode == 3 and len(lines) >= 8:
-        # [3, pdb_name, chain, idx_i, chain_i, idx_f, chain_f, email]
         return {"mode": "paths_init_final", "pdb_name": lines[1], "chain": lines[2]}
     raise ValueError("mcpath_input.txt malformed: insufficient lines for selected mode.")
 
@@ -300,13 +327,12 @@ def run_from_input(input_path: str, base_dir: Optional[str]=None) -> str:
     info = parse_mcpath_input(input_path)
     pdb_name = info["pdb_name"]
     chain    = info["chain"].strip().upper()
-    # Resolve PDB path relative to input file folder if not absolute
     root = base_dir or os.path.dirname(os.path.abspath(input_path))
     pdb_path = pdb_name if os.path.isabs(pdb_name) else os.path.join(root, pdb_name)
     if not os.path.isfile(pdb_path):
         raise FileNotFoundError(f"PDB not found: {pdb_path}")
     print(f"▶ Using input file: {input_path}")
-    print(f"   Mode={info['mode']}, PDB={pdb_path}, Chain={chain}")
+    print(f"   Mode={info['mode']}, PDB={pdb_path}, Chain='{chain or 'ALL'}'")
     return readpdb_to_cor(pdb_path, chain, out_basename=os.path.basename(pdb_name))
 
 # ---------------- Unified entrypoint (used by UI) ----------------
@@ -319,20 +345,20 @@ def run(pdb_path: Optional[str]=None,
     Preferred behavior:
       - If input_path is given (or auto-found), use mcpath_input.txt.
       - Else, require pdb_path & chain and convert directly.
+
+    chain may be "" or comma-separated as in readpdb_to_cor.
     """
-    # 1) If explicit input_path provided
     if input_path:
         return run_from_input(input_path)
 
-    # 2) Try to auto-locate mcpath_input.txt near pdb_path, CWD, or /content
     start_dir = os.path.dirname(os.path.abspath(pdb_path)) if pdb_path else None
     for cand in _find_default_input_candidates(start_dir):
         if os.path.isfile(cand):
             return run_from_input(cand, base_dir=start_dir)
 
-    # 3) Fallback to direct call
-    if not pdb_path or not chain:
-        raise ValueError("No mcpath_input.txt found and (pdb_path, chain) not provided.")
+    if not pdb_path:
+        raise ValueError("No mcpath_input.txt found and pdb_path not provided.")
     pdb_path = os.path.abspath(pdb_path)
-    print(f"▶ No input file found; converting directly: {pdb_path}, chain={chain}")
-    return readpdb_to_cor(pdb_path, chain, out_basename=out_basename or os.path.basename(pdb_path))
+    chain_str = (chain or "").strip().upper()
+    print(f"▶ No input file found; converting directly: {pdb_path}, chain='{chain_str or 'ALL'}'")
+    return readpdb_to_cor(pdb_path, chain_str, out_basename=out_basename or os.path.basename(pdb_path))
