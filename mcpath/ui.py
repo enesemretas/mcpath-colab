@@ -8,7 +8,7 @@ _FORM_ROOT = None
 _LOG_OUT   = None
 
 # -------------------- validators & helpers --------------------
-def _is_valid_pdb_code(c):
+def _is_valid_pdb_code(c): 
     return bool(re.fullmatch(r"[0-9A-Za-z]{4}", c.strip()))
 
 def _is_valid_chain(ch):
@@ -31,7 +31,7 @@ def _is_valid_chain_list(ch_str: str) -> bool:
         return True
     return all(_is_valid_chain(tok) for tok in tokens)
 
-def _is_valid_email(s):
+def _is_valid_email(s):    
     return (not s.strip()) or bool(re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", s.strip()))
 
 def _fetch_rcsb(code: str) -> bytes:
@@ -195,14 +195,10 @@ def launch(
     # Actions & shared output (singleton)
     btn_submit = W.Button(description="Submit", button_style="success", icon="paper-plane")
     btn_new_job = W.Button(description="New Job",  button_style="info", icon="plus")
-    btn_plot = W.Button(description="Plot Results", button_style="warning", icon="line-chart")
 
     if _LOG_OUT is None:
         _LOG_OUT = W.Output()
     out = _LOG_OUT  # reuse the same Output every time
-
-    # Track state across clicks (for Plot Results)
-    state = {"work_dir": None}
 
     # Grouped layouts
     pdb_row = W.HBox([pdb_code, W.HTML("&nbsp;"), or_lbl, pdb_upload, file_lbl],
@@ -234,7 +230,7 @@ def launch(
         mode2_box,
         mode3_box,
         chain_id, email,
-        W.HBox([btn_submit, btn_new_job, btn_plot]),
+        W.HBox([btn_submit, btn_new_job]),
         W.HTML("<hr>"),
         out
     ]
@@ -283,21 +279,6 @@ def launch(
             except Exception:
                 return None
 
-    def _try_import_plotter():
-        """
-        Imports the Plotly-based plotting helper:
-          mcpath/interactive_plots.py -> plot_centrality_results
-        """
-        try:
-            from .interactive_plots import plot_centrality_results
-            return plot_centrality_results
-        except Exception:
-            try:
-                from mcpath.interactive_plots import plot_centrality_results
-                return plot_centrality_results
-            except Exception:
-                return None
-
     # helper to copy with auto-suffix if destination exists
     def _copy_unique(src_path: str, dst_basename: str, work_dir: str):
         dst = os.path.join(work_dir, dst_basename)
@@ -311,25 +292,6 @@ def launch(
                 shutil.copyfile(src_path, cand)
                 return cand
             k += 1
-
-    def on_plot(_):
-        _LOG_OUT.clear_output(wait=True)
-        with _LOG_OUT:
-            if not state.get("work_dir"):
-                print("No results yet. Click Submit first.")
-                return
-
-            plotter = _try_import_plotter()
-            if plotter is None:
-                print("interactive_plots.py not found or Plotly missing.")
-                print("In Colab, install Plotly:  !pip -q install plotly")
-                return
-
-            try:
-                print(f"Plotting results from: {state['work_dir']}")
-                plotter(state["work_dir"], take_top=1)
-            except Exception as e:
-                print("Plot error:", e)
 
     def on_submit(_):
         _LOG_OUT.clear_output(wait=True)
@@ -350,9 +312,6 @@ def launch(
                 save_path = os.path.join(SAVE_DIR, pdb_name)
                 with open(save_path, "wb") as f:
                     f.write(pdb_bytes)
-
-                # Track work_dir for later plotting
-                state["work_dir"] = os.path.dirname(save_path)
 
                 input_path = os.path.join(os.path.dirname(save_path), "mcpath_input.txt")
                 mode = pred_type.value
@@ -477,19 +436,6 @@ def launch(
                             os.chdir(old_cwd2)
 
                         _progress(4, total_steps, "Path generation and centrality analysis completed.")
-
-                        # -------- Auto-plot immediately after Step 4 finishes --------
-                        try:
-                            plotter = _try_import_plotter()
-                            if plotter is None:
-                                print("Note: interactive_plots.py not found or Plotly missing.")
-                                print("To enable interactive plots in Colab:  !pip -q install plotly")
-                            else:
-                                print("Auto-plotting closeness/betweenness (interactive)...")
-                                plotter(work_dir, take_top=1)
-                        except Exception as e_plot:
-                            print(f"Warning: auto-plot failed: {e_plot}")
-
                     except Exception as e_inf:
                         print(f"Warning: infinite/closeness pipeline failed: {e_inf}")
                 elif mode == "functional":
@@ -535,4 +481,3 @@ def launch(
 
     btn_new_job.on_click(on_new_job)
     btn_submit.on_click(on_submit)
-    btn_plot.on_click(on_plot)
