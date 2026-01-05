@@ -336,14 +336,11 @@ def _extract_peak_resis_from_bfactor_pdb(pdb_path: str, b_threshold: float = 50.
     return {ch: sorted(list(s)) for ch, s in out.items()}
 
 def _view_bfactor_pdb_py3dmol(pdb_path: str, title: str):
-    """
-    Viewer that highlights residues RED based on B-factor >= 50 in the given PDB.
-    """
     if not _ensure_py3dmol():
         return
 
     import py3Dmol
-    from IPython.display import display, HTML, FileLink
+    from IPython.display import display, HTML
 
     pdb_text = open(pdb_path, "r", encoding="utf-8", errors="ignore").read()
     peaks = _extract_peak_resis_from_bfactor_pdb(pdb_path, b_threshold=50.0)
@@ -352,7 +349,6 @@ def _view_bfactor_pdb_py3dmol(pdb_path: str, title: str):
     view.addModel(pdb_text, "pdb")
     view.setStyle({}, {"cartoon": {"color": "lightgray"}})
 
-    # Highlight based on B-factor-coded peaks
     for ch, resis in peaks.items():
         if not resis:
             continue
@@ -361,14 +357,10 @@ def _view_bfactor_pdb_py3dmol(pdb_path: str, title: str):
 
     view.zoomTo()
 
-    # Save HTML always (reliable inside widget Output)
-    html_path = os.path.splitext(pdb_path)[0] + ".html"
-    with open(html_path, "w", encoding="utf-8") as f:
-        f.write(view._make_html())
-
     display(HTML(f"<b>{title}</b>"))
-    display(FileLink(html_path))
+    _show_download(pdb_path, label=os.path.basename(pdb_path))  # <-- PDB link instead of HTML
     view.show()
+
 
 def _write_pymol_pml(pml_path: str, pdb_close: str, pdb_betw: str):
     """
@@ -804,19 +796,28 @@ def launch(
                                 # CA order mapping (used for indices->residues)
                                 residues_in_order = _ca_residues_in_order_keys(save_path, chain_global)
 
-                                # -------- Closeness peaks: from closeness_chain_labels.txt (top-N by value) --------
-                                close_labels = os.path.join(work_dir, "closeness_chain_labels.txt")
+                                # -------- Closeness peaks (robust): parse tokens like 16A, 1913Q --------
                                 close_peak_keys = set()
-                                if os.path.isfile(close_labels):
-                                    top_chain_resnums = _parse_closeness_chain_labels_top_resnums(close_labels, top_n=30)
-                                    close_peak_keys = _keys_from_chain_resnums(top_chain_resnums, residues_in_order)
-                                else:
-                                    print("Warning: closeness_chain_labels.txt not found; cannot build closeness peak set.")
+                                close_candidates = [
+                                    os.path.join(work_dir, "closeness_chain_labels.txt"),
+                                    os.path.join(work_dir, "closeness_peaks"),
+                                    os.path.join(work_dir, "closeness_peaks.txt"),
+                                ]
+
+                                for fp in close_candidates:
+                                    if os.path.isfile(fp):
+                                        pairs = _parse_reschain_pairs(fp)  # <--- THIS is the fix
+                                        if pairs:
+                                            close_peak_keys = _keys_from_chain_resnums(pairs, residues_in_order)
+                                            if close_peak_keys:
+                                                break
 
                                 close_pdb_out = os.path.join(work_dir, f"{base}_CLOSENESS_peaks_bfac.pdb")
                                 if close_peak_keys:
-                                    _write_bfactor_peak_pdb(save_path, close_pdb_out, close_peak_keys, peak_b=100.0, other_b=0.0)
+                                    _write_bfactor_peak_pdb(save_path, close_pdb_out, close_peak_keys,
+                                                            peak_b=100.0, other_b=0.0)
                                     print(f"[PDB] Wrote closeness peaks B-factor PDB: {close_pdb_out}")
+                                    _show_download(close_pdb_out, label=os.path.basename(close_pdb_out))
                                 else:
                                     print("Warning: closeness peak set is empty; skipping closeness PDB write.")
 
