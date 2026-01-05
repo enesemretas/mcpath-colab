@@ -1,5 +1,5 @@
 # mcpath/ui.py
-import os, re, requests, yaml, importlib, shutil, sys, glob, subprocess
+import os, re, requests, yaml, importlib, shutil, sys, glob, subprocess, zipfile
 from IPython.display import display, clear_output, HTML
 import ipywidgets as W
 
@@ -79,9 +79,9 @@ def _find_first_existing(work_dir: str, candidates):
             return p
     return None
 
-# -------------------- Peak -> B-factor PDB + viewer helpers --------------------
+# -------------------- Peak parsing + mapping --------------------
 _NUM_RE = re.compile(r"[-+]?(?:\d*\.\d+|\d+)(?:[eE][-+]?\d+)?")
-# Matches lines like "16 A ..." or "16 1 ..." or "16A ..." (but for tabular peaks file we care about "16 1")
+# For both "16A" or "16 1" style tokens
 _RESCHAIN_RE = re.compile(r"\b(\d+)\s*([A-Za-z0-9]+)\b")
 
 def _ensure_py3dmol():
@@ -148,7 +148,7 @@ def _read_pure_ints(path: str):
 
 def _parse_reschain_pairs(path: str):
     """
-    Extract (chain, number) pairs from lines like:
+    Extract (chainToken, number) pairs from lines like:
       16A  -> ...
       1913Q -> ...
     """
@@ -165,7 +165,7 @@ def _parse_reschain_pairs(path: str):
 
 def _parse_chain_resnum_value_lines(path: str):
     """
-    Parse lines containing e.g. tabular format:
+    Parse tabular peaks lines like:
       16   1   16.1   0.349624
     Returns list of (value, chainToken, resnum)
       -> (0.349624, '1', 16)
@@ -302,8 +302,12 @@ def _ints_to_peak_keys_auto(ints_list, residues_in_order):
             keys.add((r["chain"], r["resi_raw"]))
     return keys
 
+# -------------------- PDB writing helpers --------------------
 def _write_bfactor_peak_pdb(pdb_in: str, pdb_out: str, peak_keys: set,
                             peak_b: float = 100.0, other_b: float = 0.0):
+    """
+    Writes a FULL protein PDB but encodes peaks in B-factor (B=peak_b for peaks, other_b otherwise).
+    """
     os.makedirs(os.path.dirname(pdb_out) or ".", exist_ok=True)
 
     with open(pdb_in, "r", encoding="utf-8", errors="ignore") as fin, \
@@ -316,7 +320,7 @@ def _write_bfactor_peak_pdb(pdb_in: str, pdb_out: str, peak_keys: set,
                 resi_raw = f"{resi}{icode}" if icode else resi
 
                 b = peak_b if (ch, resi_raw) in peak_keys else other_b
-                b_str = f"{b:6.2f}"
+                b_str = f"{float(b):6.2f}"
 
                 if len(line) < 66:
                     line = line.rstrip("\n").ljust(66) + "\n"
@@ -325,6 +329,41 @@ def _write_bfactor_peak_pdb(pdb_in: str, pdb_out: str, peak_keys: set,
 
     return pdb_out
 
+def _write_peak_only_pdb(pdb_in: str, pdb_out: str, peak_keys: set, peak_b: float = 100.0):
+    """
+    Write a PDB that contains ONLY atoms belonging to residues in peak_keys.
+    Sets B-factor=peak_b for all kept atoms (so viewers can select b>50).
+    """
+    os.makedirs(os.path.dirname(pdb_out) or ".", exist_ok=True)
+
+    wrote_any = False
+    with open(pdb_in, "r", encoding="utf-8", errors="ignore") as fin, \
+         open(pdb_out, "w", encoding="utf-8") as fout:
+        for line in fin:
+            if not line.startswith(("ATOM", "HETATM")):
+                continue
+
+            ch = line[21].strip()
+            resi = line[22:26].strip()
+            icode = line[26].strip()
+            resi_raw = f"{resi}{icode}" if icode else resi
+
+            if (ch, resi_raw) not in peak_keys:
+                continue
+
+            wrote_any = True
+            b_str = f"{float(peak_b):6.2f}"
+            if len(line) < 66:
+                line = line.rstrip("\n").ljust(66) + "\n"
+            line = line[:60] + b_str + line[66:]
+            fout.write(line)
+
+        if wrote_any:
+            fout.write("END\n")
+
+    return pdb_out if wrote_any else None
+
+# -------------------- Viewer (optional; kept for your UI) --------------------
 def _extract_peak_resis_from_bfactor_pdb(pdb_path: str, b_threshold: float = 50.0):
     out = {}
     seen = set()
@@ -372,8 +411,8 @@ def _view_bfactor_pdb_py3dmol(pdb_path: str, title: str, sphere_radius: float = 
         return
 
     _enable_colab_widgets()
-
     import py3Dmol
+
     pdb_text = open(pdb_path, "r", encoding="utf-8", errors="ignore").read()
     peaks = _extract_peak_resis_from_bfactor_pdb(pdb_path, b_threshold=50.0)
 
@@ -393,47 +432,94 @@ def _view_bfactor_pdb_py3dmol(pdb_path: str, title: str, sphere_radius: float = 
     display(HTML(f"<b>{title}</b>"))
     view.show()
 
-def _write_pymol_pml(pml_path: str, pdb_close: str, pdb_betw: str):
-    pml = f"""
-reinitialize
-bg_color white
-set ray_opaque_background, off
+# -------------------- Packaging (RAR preferred, ZIP fallback) --------------------
+def _collect_chain_plot_files(work_dir: str):
+    """
+    Grab files like:
+      closeness_chain_plot.*
+      betweenness_chain_plot.*
+    """
+    out = []
+    patterns = [
+        "closeness_chain_plot*",
+        "betweenness_chain_plot*",
+        "*closeness*chain*plot*",
+        "*betweenness*chain*plot*",
+    ]
+    for pat in patterns:
+        out.extend(glob.glob(os.path.join(work_dir, pat)))
 
-load {pdb_close}, closeness
-load {pdb_betw}, betweenness
+    uniq = []
+    seen = set()
+    for p in out:
+        ap = os.path.abspath(p)
+        if os.path.isfile(ap) and ap not in seen:
+            seen.add(ap)
+            uniq.append(ap)
+    return uniq
 
-hide everything, all
+def _make_rar_or_zip(work_dir: str, base_name: str, file_paths: list):
+    """
+    Try to make a .rar (requires `rar` command).
+    If not possible, fall back to .zip.
+    """
+    file_paths = [os.path.abspath(p) for p in file_paths if p and os.path.isfile(p)]
+    if not file_paths:
+        return None
 
-# --- closeness view ---
-enable closeness
-disable betweenness
-show cartoon, closeness
-color gray80, closeness
-select c_peaks, closeness and b > 50
-color red, c_peaks
-show spheres, c_peaks and name CA
-set sphere_scale, 0.6, c_peaks
-orient closeness
-scene closeness, store
+    rar_path = os.path.join(work_dir, f"{base_name}.rar")
+    zip_path = os.path.join(work_dir, f"{base_name}.zip")
 
-# --- betweenness view ---
-disable closeness
-enable betweenness
-show cartoon, betweenness
-color gray80, betweenness
-select b_peaks, betweenness and b > 50
-color red, b_peaks
-show spheres, b_peaks and name CA
-set sphere_scale, 0.6, b_peaks
-orient betweenness
-scene betweenness, store
-"""
-    os.makedirs(os.path.dirname(pml_path) or ".", exist_ok=True)
-    with open(pml_path, "w", encoding="utf-8") as f:
-        f.write(pml.strip() + "\n")
-    return pml_path
+    # --- Try RAR ---
+    rar_exe = shutil.which("rar")
+    if rar_exe is None:
+        # Try installing rar (may fail on some environments)
+        try:
+            subprocess.check_call(["apt-get", "update", "-qq"])
+            subprocess.check_call(["apt-get", "install", "-y", "rar"])
+            rar_exe = shutil.which("rar")
+        except Exception:
+            rar_exe = None
 
-# --- Single row: "<Label> : [List | Custom]  <value-widget>"
+    if rar_exe is not None:
+        try:
+            # -ep1: store only filenames (no full paths)
+            cmd = [rar_exe, "a", "-idq", "-ep1", rar_path] + file_paths
+            subprocess.check_call(cmd)
+            if os.path.isfile(rar_path):
+                return rar_path
+        except Exception:
+            pass
+
+    # --- ZIP fallback ---
+    try:
+        with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as z:
+            for p in file_paths:
+                z.write(p, arcname=os.path.basename(p))
+        return zip_path if os.path.isfile(zip_path) else None
+    except Exception:
+        return None
+
+def _download_file(path: str):
+    """
+    Colab: triggers browser download.
+    Non-colab: prints where it was saved (no link).
+    """
+    if not path or (not os.path.isfile(path)):
+        print("Warning: archive not found; nothing to download.")
+        return
+
+    try:
+        from google.colab import files
+        files.download(path)
+        return
+    except Exception:
+        pass
+
+    # No links (per your preference)
+    print("Archive saved at:", path)
+
+# -------------------- UI helpers --------------------
 def _list_or_custom_row(label: str, options, default_value, minv, maxv, step=1):
     options = sorted({int(x) for x in options})
     default_value = int(default_value)
@@ -650,7 +736,8 @@ def launch(
             k += 1
 
     def on_submit(_):
-        viewers = []  # render OUTSIDE ipywidgets.Output capture: (pdb_path, title, radius, sticks)
+        viewers = []                # optional: show views after logs
+        archive_to_download = None  # will download after Output capture
 
         _LOG_OUT.clear_output(wait=True)
 
@@ -753,6 +840,11 @@ def launch(
                 # -------- Step 4: infinite path + closeness/betweenness --------
                 work_dir = os.path.dirname(save_path)
 
+                close_peak_keys = set()
+                betw_peak_keys  = set()
+                close_only_pdb  = None
+                betw_only_pdb   = None
+
                 if mode == "functional" and cor_path and os.path.isfile(cor_path):
                     try:
                         inf_mod = importlib.import_module("mcpath.infinite")
@@ -794,81 +886,97 @@ def launch(
                         finally:
                             os.chdir(old_cwd2)
 
-                        # ---- Step 4b: write B-factor PDBs (QUEUE viewers; do not render here) ----
-                        try:
-                            base = os.path.splitext(os.path.basename(save_path))[0]
+                        # ---- Step 4b: parse peaks -> map -> write PEAK-ONLY pdbs + archive ----
+                        base = os.path.splitext(os.path.basename(save_path))[0]
+                        residues_in_order = _ca_residues_in_order(save_path, chain_str=chain_global)
 
-                            residues_in_order = _ca_residues_in_order(save_path, chain_str=chain_global)
-
-                            # --- CLOSENESS ---
-                            close_peak_keys = set()
-                            close_src = _find_first_existing(work_dir, [
-                                "closeness_peaks", "closeness_peaks.txt",
-                                "closeness_chain_labels.txt"
-                            ])
-                            if close_src:
-                                rows = _parse_chain_resnum_value_lines(close_src)
-                                if rows:
-                                    rows.sort(key=lambda x: x[0], reverse=True)
-                                    pairs = [(ch, n) for (val, ch, n) in rows[:30]]
-                                else:
-                                    pairs = _parse_reschain_pairs(close_src)
-
-                                close_peak_keys = _pairs_to_peak_keys_auto(pairs, residues_in_order)
-                                print(f"[closeness] parsed {len(pairs)} peaks from {os.path.basename(close_src)} -> mapped {len(close_peak_keys)} residues")
+                        # --- CLOSENESS peaks file ---
+                        close_src = _find_first_existing(work_dir, [
+                            "closeness_peaks", "closeness_peaks.txt",
+                            "closeness_chain_labels.txt"
+                        ])
+                        if close_src:
+                            rows = _parse_chain_resnum_value_lines(close_src)
+                            if rows:
+                                rows.sort(key=lambda x: x[0], reverse=True)
+                                pairs = [(ch, n) for (val, ch, n) in rows[:30]]
                             else:
-                                print("Warning: no closeness peaks file found.")
+                                pairs = _parse_reschain_pairs(close_src)
 
-                            close_pdb_out = os.path.join(work_dir, f"{base}_CLOSENESS_peaks_bfac.pdb")
-                            if close_peak_keys:
-                                _write_bfactor_peak_pdb(save_path, close_pdb_out, close_peak_keys, peak_b=100.0, other_b=0.0)
-                                print(f"[PDB] Wrote closeness peaks B-factor PDB: {close_pdb_out}")
-                                viewers.append((close_pdb_out, "Closeness peaks (B=100 → RED spheres)", 0.9, False))
+                            close_peak_keys = _pairs_to_peak_keys_auto(pairs, residues_in_order)
+                            print(f"[closeness] parsed {len(pairs)} peaks from {os.path.basename(close_src)} -> mapped {len(close_peak_keys)} residues")
+                        else:
+                            print("Warning: no closeness peaks file found.")
+
+                        # --- BETWEENNESS peaks file ---
+                        betw_src = _find_first_existing(work_dir, [
+                            "betweenness_peaks", "betweenness_peaks.txt",
+                            "betw_peaks", "betw_peaks.txt",
+                            "betweenness_chain_labels.txt"
+                        ])
+                        if betw_src:
+                            rows = _parse_chain_resnum_value_lines(betw_src)
+                            if rows:
+                                rows.sort(key=lambda x: x[0], reverse=True)
+                                pairs = [(ch, n) for (val, ch, n) in rows[:30]]
+                                betw_peak_keys = _pairs_to_peak_keys_auto(pairs, residues_in_order)
+                                print(f"[betweenness] parsed {len(pairs)} peaks from {os.path.basename(betw_src)} -> mapped {len(betw_peak_keys)} residues")
                             else:
-                                print("Warning: closeness peak set is empty; skipping closeness PDB write.")
-
-                            # --- BETWEENNESS ---
-                            betw_peak_keys = set()
-                            betw_src = _find_first_existing(work_dir, [
-                                "betweenness_peaks", "betweenness_peaks.txt",
-                                "betw_peaks", "betw_peaks.txt",
-                                "betweenness_chain_labels.txt"
-                            ])
-                            if betw_src:
-                                rows = _parse_chain_resnum_value_lines(betw_src)
-                                if rows:
-                                    rows.sort(key=lambda x: x[0], reverse=True)
-                                    pairs = [(ch, n) for (val, ch, n) in rows[:30]]
+                                pairs = _parse_reschain_pairs(betw_src)
+                                if pairs:
                                     betw_peak_keys = _pairs_to_peak_keys_auto(pairs, residues_in_order)
                                     print(f"[betweenness] parsed {len(pairs)} peaks from {os.path.basename(betw_src)} -> mapped {len(betw_peak_keys)} residues")
                                 else:
-                                    pairs = _parse_reschain_pairs(betw_src)
-                                    if pairs:
-                                        betw_peak_keys = _pairs_to_peak_keys_auto(pairs, residues_in_order)
-                                        print(f"[betweenness] parsed {len(pairs)} peaks from {os.path.basename(betw_src)} -> mapped {len(betw_peak_keys)} residues")
-                                    else:
-                                        ints_list = _read_pure_ints(betw_src)
-                                        betw_peak_keys = _ints_to_peak_keys_auto(ints_list, residues_in_order)
-                                        print(f"[betweenness] parsed {len(ints_list)} ints from {os.path.basename(betw_src)} -> mapped {len(betw_peak_keys)} residues")
+                                    ints_list = _read_pure_ints(betw_src)
+                                    betw_peak_keys = _ints_to_peak_keys_auto(ints_list, residues_in_order)
+                                    print(f"[betweenness] parsed {len(ints_list)} ints from {os.path.basename(betw_src)} -> mapped {len(betw_peak_keys)} residues")
+                        else:
+                            print("Warning: no betweenness peaks file found.")
+
+                        # --- write PEAK-ONLY pdbs (these are what you asked for) ---
+                        if close_peak_keys:
+                            close_only_pdb = os.path.join(work_dir, f"{base}_CLOSENESS_peaks_ONLY.pdb")
+                            close_only_pdb = _write_peak_only_pdb(save_path, close_only_pdb, close_peak_keys, peak_b=100.0)
+                            if close_only_pdb:
+                                print(f"[PDB] Wrote closeness PEAK-ONLY PDB: {close_only_pdb}")
+                                # optional view queue (red spheres based on B-factor):
+                                viewers.append((close_only_pdb, "Closeness PEAK-ONLY (RED spheres)", 1.0, False))
                             else:
-                                print("Warning: no betweenness peaks file found.")
+                                print("Warning: closeness PEAK-ONLY PDB not written (no atoms matched).")
+                        else:
+                            print("Warning: closeness peak set is empty; PEAK-ONLY closeness PDB not written.")
 
-                            betw_pdb_out = os.path.join(work_dir, f"{base}_BETWEENNESS_peaks_bfac.pdb")
-                            if betw_peak_keys:
-                                _write_bfactor_peak_pdb(save_path, betw_pdb_out, betw_peak_keys, peak_b=100.0, other_b=0.0)
-                                print(f"[PDB] Wrote betweenness peaks B-factor PDB: {betw_pdb_out}")
-                                viewers.append((betw_pdb_out, "Betweenness peaks (B=100 → RED spheres)", 0.9, False))
+                        if betw_peak_keys:
+                            betw_only_pdb = os.path.join(work_dir, f"{base}_BETWEENNESS_peaks_ONLY.pdb")
+                            betw_only_pdb = _write_peak_only_pdb(save_path, betw_only_pdb, betw_peak_keys, peak_b=100.0)
+                            if betw_only_pdb:
+                                print(f"[PDB] Wrote betweenness PEAK-ONLY PDB: {betw_only_pdb}")
+                                viewers.append((betw_only_pdb, "Betweenness PEAK-ONLY (RED spheres)", 1.0, False))
                             else:
-                                print("Warning: betweenness peak set is empty; skipping betweenness PDB write.")
+                                print("Warning: betweenness PEAK-ONLY PDB not written (no atoms matched).")
+                        else:
+                            print("Warning: betweenness peak set is empty; PEAK-ONLY betweenness PDB not written.")
 
-                            # PyMOL script (no download link)
-                            if close_peak_keys and betw_peak_keys:
-                                pml_path = os.path.join(work_dir, f"{base}_peaks_bfac_views.pml")
-                                _write_pymol_pml(pml_path, close_pdb_out, betw_pdb_out)
-                                print(f"[PyMOL] Wrote script: {pml_path}")
+                        # --- collect plot files and create archive (.rar preferred, .zip fallback) ---
+                        plot_files = _collect_chain_plot_files(work_dir)
+                        if plot_files:
+                            print("[plots] Included:")
+                            for p in plot_files:
+                                print(" ", os.path.basename(p))
+                        else:
+                            print("Warning: could not find chain plot files (closeness_chain_plot*, betweenness_chain_plot*).")
 
-                        except Exception as e_bfac:
-                            print(f"Warning: B-factor peak PDB generation failed: {e_bfac}")
+                        files_to_pack = [save_path]
+                        if close_only_pdb: files_to_pack.append(close_only_pdb)
+                        if betw_only_pdb:  files_to_pack.append(betw_only_pdb)
+                        files_to_pack += plot_files
+
+                        archive_base = f"{base}_MCPath_package"
+                        archive_to_download = _make_rar_or_zip(work_dir, archive_base, files_to_pack)
+                        if archive_to_download:
+                            print(f"[archive] Created: {archive_to_download}")
+                        else:
+                            print("Warning: archive could not be created.")
 
                         _progress(4, total_steps, "Path generation and centrality analysis completed.")
 
@@ -917,11 +1025,14 @@ def launch(
             except Exception as e:
                 print("Error:", e)
 
-        # ---- Render py3Dmol OUTSIDE the Output widget capture ----
+        # ---- OUTSIDE Output capture: show viewers + trigger download ----
         if viewers:
             display(HTML("<hr><h4>3D Views</h4>"))
             for (pdb_path, title, radius, sticks) in viewers:
                 _view_bfactor_pdb_py3dmol(pdb_path, title, sphere_radius=radius, show_sticks=sticks)
+
+        if archive_to_download:
+            _download_file(archive_to_download)
 
     btn_new_job.on_click(on_new_job)
     btn_submit.on_click(on_submit)
