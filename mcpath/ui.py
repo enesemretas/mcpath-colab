@@ -432,26 +432,6 @@ def launch(
                             os.chdir(work_dir)
                             close_mod.main()
                             betw_mod.main()
-                            # ---- Step 4b: write PyMOL two-scene view (closeness vs betweenness) ----
-                            try:
-                                try:
-                                    from .pymol_views import build_views_autodetect
-                                except Exception:
-                                    from mcpath.pymol_views import build_views_autodetect
-
-                                pml_path = build_views_autodetect(
-                                    pdb_path=save_path,
-                                    work_dir=work_dir,
-                                    chain_id=chain_global,   # "" means all chains
-                                    top_n=30,
-                                    label_top=10,
-                                    write_png=True
-                                )
-                                print(f"[PyMOL] Wrote: {pml_path}")
-                            except Exception as e_pml:
-                                print(f"Warning: PyMOL view generation failed: {e_pml}")
-
-                        
                         finally:
                             os.chdir(old_cwd2)
 
