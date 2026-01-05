@@ -1,6 +1,6 @@
 # mcpath/ui.py
 import os, re, requests, yaml, importlib, shutil, sys, glob, subprocess
-from IPython.display import display, HTML, IFrame
+from IPython.display import display, clear_output, HTML, IFrame
 import ipywidgets as W
 
 # ---------- singletons (so New Job/Submit always uses the same log panel) ----------
@@ -369,11 +369,21 @@ def _iframe_src_for(path: str) -> str:
     return ap
 
 
+import uuid
+
+def _colab_iframe_src(html_path: str) -> str:
+    ap = os.path.abspath(html_path)
+    # Colab serves /content via /files/
+    if ap.startswith("/content/"):
+        rel = ap[len("/content/"):].lstrip("/")
+        return f"/files/{rel}"
+    # fallback (shouldn't happen if we write to /content)
+    return ap
+
+
 def _view_bfactor_pdb_py3dmol(pdb_path: str, title: str, sphere_radius: float = 0.9, show_sticks: bool = False):
     """
-    Robust viewer:
-      - tries display(view)
-      - if blank (common in Output widgets), writes html and shows via IFrame
+    Always render via IFrame (robust inside ipywidgets.Output in Colab).
     No download links.
     """
     if not _ensure_py3dmol():
@@ -400,19 +410,15 @@ def _view_bfactor_pdb_py3dmol(pdb_path: str, title: str, sphere_radius: float = 
     view.zoomTo()
     display(HTML(f"<b>{title}</b>"))
 
-    # Attempt direct render
-    try:
-        display(view)
-        return
-    except Exception:
-        pass
+    # Write HTML into /content so Colab can serve it at /files/...
+    base = os.path.splitext(os.path.basename(pdb_path))[0]
+    html_path = f"/content/{base}_py3dmol_{uuid.uuid4().hex}.html"
 
-    # Fallback: iframe (most reliable inside ipywidgets.Output)
-    html_path = os.path.splitext(pdb_path)[0] + "_py3dmol.html"
     with open(html_path, "w", encoding="utf-8") as f:
         f.write(view._make_html())
 
-    display(IFrame(src=_iframe_src_for(html_path), width=870, height=560))
+    display(IFrame(src=_colab_iframe_src(html_path), width=870, height=560))
+
 
 def _write_pymol_pml(pml_path: str, pdb_close: str, pdb_betw: str):
     pml = f"""
