@@ -1,6 +1,6 @@
 # mcpath/ui.py
 import os, re, requests, yaml, importlib, shutil, sys, glob, subprocess
-from IPython.display import display, clear_output, HTML, FileLink
+from IPython.display import display, HTML, IFrame
 import ipywidgets as W
 
 # ---------- singletons (so New Job/Submit always uses the same log panel) ----------
@@ -58,8 +58,8 @@ def _progress(step: int, total: int, message: str):
     print(f"[{step}/{total}] {message}")
 
 def _show_download(path: str, label: str = "file"):
-    display(HTML(f"<b>Download {label}:</b>"))
-    display(FileLink(path))
+    # user requested: no download links in output
+    return
 
 def _find_first_existing(work_dir: str, candidates):
     for name in candidates:
@@ -359,13 +359,25 @@ def _extract_peak_resis_from_bfactor_pdb(pdb_path: str, b_threshold: float = 50.
 
     return {ch: sorted(list(s)) for ch, s in out.items()}
 
+def _iframe_src_for(path: str) -> str:
+    ap = os.path.abspath(path)
+    # Colab serves /content via /files/
+    if ap.startswith("/content/"):
+        rel = ap[len("/content/"):].lstrip("/")
+        return f"/files/{rel}"
+    # fallback
+    return ap
+
+
 def _view_bfactor_pdb_py3dmol(pdb_path: str, title: str, sphere_radius: float = 0.9, show_sticks: bool = False):
     """
-    Use view.show() (no html file), show RED spheres for peaks (B>=50).
+    Robust viewer:
+      - tries display(view)
+      - if blank (common in Output widgets), writes html and shows via IFrame
+    No download links.
     """
     if not _ensure_py3dmol():
         print("Warning: py3Dmol not available; skipping viewer.")
-        _show_download(pdb_path, label=os.path.basename(pdb_path))
         return
 
     import py3Dmol
@@ -387,8 +399,20 @@ def _view_bfactor_pdb_py3dmol(pdb_path: str, title: str, sphere_radius: float = 
 
     view.zoomTo()
     display(HTML(f"<b>{title}</b>"))
-    _show_download(pdb_path, label=os.path.basename(pdb_path))
-    view.show()
+
+    # Attempt direct render
+    try:
+        display(view)
+        return
+    except Exception:
+        pass
+
+    # Fallback: iframe (most reliable inside ipywidgets.Output)
+    html_path = os.path.splitext(pdb_path)[0] + "_py3dmol.html"
+    with open(html_path, "w", encoding="utf-8") as f:
+        f.write(view._make_html())
+
+    display(IFrame(src=_iframe_src_for(html_path), width=870, height=560))
 
 def _write_pymol_pml(pml_path: str, pdb_close: str, pdb_betw: str):
     pml = f"""
