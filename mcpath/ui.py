@@ -1,4 +1,6 @@
 # mcpath/ui.py
+import time
+from contextlib import contextmanager
 import os, re, requests, yaml, importlib, shutil, sys, glob
 from IPython.display import display, clear_output
 import ipywidgets as W
@@ -8,6 +10,53 @@ _FORM_ROOT = None
 _LOG_OUT   = None
 
 # -------------------- validators & helpers --------------------
+
+@contextmanager
+def _pushd(path: str):
+    old = os.getcwd()
+    os.chdir(path)
+    try:
+        yield
+    finally:
+        os.chdir(old)
+
+def _fast_link(src: str, dst: str):
+    """
+    Prefer hardlink (fast, no extra space). If that fails, try symlink.
+    If that fails too, fall back to copying.
+    """
+    src = os.path.abspath(src)
+    dst = os.path.abspath(dst)
+
+    # ensure parent exists
+    os.makedirs(os.path.dirname(dst), exist_ok=True)
+
+    # remove existing dst if any (shouldn't happen in fresh run dirs)
+    try:
+        if os.path.lexists(dst):
+            os.remove(dst)
+    except Exception:
+        pass
+
+    # hardlink -> symlink -> copy fallback
+    try:
+        os.link(src, dst)
+        return dst
+    except Exception:
+        try:
+            os.symlink(src, dst)
+            return dst
+        except Exception:
+            shutil.copyfile(src, dst)
+            return dst
+
+def _make_run_dir(work_dir: str, base: str, steps: int) -> str:
+    # unique folder per run => avoids suffix scanning + avoids overwriting outputs
+    run_dir = os.path.join(work_dir, f"mcpath_run_{base}_{steps}_{int(time.time())}")
+    os.makedirs(run_dir, exist_ok=True)
+    return run_dir
+
+
 def _is_valid_pdb_code(c): 
     return bool(re.fullmatch(r"[0-9A-Za-z]{4}", c.strip()))
 
@@ -395,51 +444,61 @@ def launch(
                 # -------- Step 4: infinite path + closeness/betweenness --------
                 if mode == "functional" and cor_path and os.path.isfile(cor_path):
                     try:
-                        inf_mod = importlib.import_module("mcpath.infinite")
-                        importlib.reload(inf_mod)
+                        # Import once (reload is expensive and rarely needed in production)
+                        inf_mod   = importlib.import_module("mcpath.infinite")
+                        close_mod = importlib.import_module("mcpath.closeness")
+                        betw_mod  = importlib.import_module("mcpath.betweenness")
 
                         work_dir = os.path.dirname(save_path)
-                        old_cwd = os.getcwd()
-                        try:
-                            os.chdir(work_dir)
-                            steps = int(get_big_len())
-                            path_arr = inf_mod.infinite(
-                                os.path.basename(os.path.splitext(save_path)[0]),
-                                path_length=steps,
-                                pottype='1'
-                            )
-                            pl = path_arr.shape[1]
-                            path_src = f"{os.path.basename(os.path.splitext(save_path)[0])}_atomistic_{pl}steps_infinite.path"
-                            path_src = os.path.join(work_dir, path_src)
-                        finally:
-                            os.chdir(old_cwd)
+                        base_abs_no_ext = os.path.splitext(save_path)[0]          # /.../XXXX
+                        base = os.path.basename(base_abs_no_ext)                  # XXXX
+                        steps = int(get_big_len())
 
-                        cor_src  = f"{os.path.splitext(save_path)[0]}.cor"
-                        atom_src = f"{os.path.splitext(save_path)[0]}_atomistic.out"
+                        # Create isolated run directory for this run
+                        run_dir = _make_run_dir(work_dir, base, steps)
 
-                        coor_fixed = _copy_unique(cor_src,  "coor_file", work_dir=os.path.dirname(cor_src))
-                        atom_fixed = _copy_unique(atom_src, "atom_file", work_dir=os.path.dirname(atom_src))
-                        path_fixed = _copy_unique(path_src, "path_file", work_dir=os.path.dirname(path_src))
+                        # Paths to inputs produced in Steps 2-3
+                        cor_src  = f"{base_abs_no_ext}.cor"
+                        atom_src = f"{base_abs_no_ext}_atomistic.out"
 
-                        close_mod = importlib.import_module("mcpath.closeness")
-                        importlib.reload(close_mod)
+                        if not os.path.isfile(cor_src):
+                            raise FileNotFoundError(f"Missing .cor: {cor_src}")
+                        if not os.path.isfile(atom_src):
+                            raise FileNotFoundError(f"Missing atomistic output: {atom_src}")
 
-                        betw_mod = importlib.import_module("mcpath.betweenness")
-                        importlib.reload(betw_mod)
+                        # Link inputs into run_dir using the names that infinite() expects
+                        _fast_link(cor_src,  os.path.join(run_dir, f"{base}.cor"))
+                        _fast_link(atom_src, os.path.join(run_dir, f"{base}_atomistic.out"))
 
-                        old_cwd2 = os.getcwd()
-                        try:
-                            os.chdir(work_dir)
+                        # Run infinite() inside run_dir so the huge .path stays there (no copies)
+                        with _pushd(run_dir):
+                            # Optional cache: if a matching path already exists in this run_dir, skip generation
+                            existing = glob.glob(f"{base}_atomistic_*steps_infinite.path")
+                            if not existing:
+                                inf_mod.infinite(base, path_length=steps, pottype="1")
+
+                            # Find the newest generated path file
+                            paths = glob.glob(f"{base}_atomistic_*steps_infinite.path")
+                            if not paths:
+                                raise FileNotFoundError("infinite() did not produce a *.path file.")
+                            path_generated = max(paths, key=os.path.getmtime)
+
+                            # Link “standard” filenames expected by closeness/betweenness
+                            _fast_link(os.path.join(run_dir, f"{base}.cor"),              os.path.join(run_dir, "coor_file"))
+                            _fast_link(os.path.join(run_dir, f"{base}_atomistic.out"),    os.path.join(run_dir, "atom_file"))
+                            _fast_link(os.path.join(run_dir, path_generated),             os.path.join(run_dir, "path_file"))
+
+                            # Run centrality
                             close_mod.main()
                             betw_mod.main()
-                        finally:
-                            os.chdir(old_cwd2)
 
-                        _progress(4, total_steps, "Path generation and centrality analysis completed.")
+                        _progress(4, total_steps, f"Path + centrality completed (outputs in: {run_dir})")
+
                     except Exception as e_inf:
                         print(f"Warning: infinite/closeness pipeline failed: {e_inf}")
                 elif mode == "functional":
                     print("Warning: Skipping path/centrality analysis (missing .cor or earlier failure).")
+
 
                 # -------- Step 5: remote submission (if configured) --------
                 data = {"prediction_mode": mode, FN["chain_id"]: chain_global}
