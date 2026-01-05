@@ -621,7 +621,7 @@ def launch(
                             os.chdir(work_dir)
                             close_mod.main()
                             betw_mod.main()
-                           
+
                             # ---- Step 4b: py3Dmol = main PDB + RED peak residues (separate views) ----
                             try:
                                 work_dir = os.path.dirname(save_path)
@@ -629,19 +629,18 @@ def launch(
                                 residues_in_order = _parse_ca_residues_in_order(save_path, chain_global)
 
                                 # ---- Closeness peaks ----
-                                # Prefer closeness_chain_labels if present (often contains label+values).
                                 close_labels = os.path.join(work_dir, "closeness_chain_labels.txt")
                                 close_sel = {}
                                 if os.path.isfile(close_labels):
                                     close_sel = _top_from_closeness_chain_labels(close_labels, top_n=30)
 
-                                # Fallback: if closeness peaks file exists, map indices -> residues
                                 close_peaks = None
                                 for cand in ["closeness_peaks", "closeness_peaks.txt", "close_peaks", "close_peaks.txt"]:
                                     p = os.path.join(work_dir, cand)
                                     if os.path.isfile(p):
                                         close_peaks = p
                                         break
+
                                 if (not close_sel) and close_peaks:
                                     idxs = _read_peak_indices(close_peaks)
                                     close_sel = _chain_to_resi_from_indices(idxs, residues_in_order)
@@ -660,7 +659,6 @@ def launch(
                                     print("Warning: No closeness peak residues could be determined (no parsable closeness output).")
 
                                 # ---- Betweenness peaks ----
-                                # Your run produced 'betweenness_peaks' (no extension), so use it directly if present.
                                 betw_peaks = None
                                 for cand in ["betweenness_peaks", "betweenness_peaks.txt", "betw_peaks", "betw_peaks.txt"]:
                                     p = os.path.join(work_dir, cand)
@@ -687,10 +685,9 @@ def launch(
                             except Exception as e_vis:
                                 print(f"Warning: py3Dmol peak visualization failed: {e_vis}")
 
-
-                        
                         finally:
                             os.chdir(old_cwd2)
+
 
                         _progress(4, total_steps, "Path generation and centrality analysis completed.")
                     except Exception as e_inf:
