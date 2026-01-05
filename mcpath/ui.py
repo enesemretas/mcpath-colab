@@ -768,68 +768,69 @@ def launch(
                             close_mod.main()
                             betw_mod.main()
 
-                            # ---- Step 4b: py3Dmol = main PDB + RED peak residues (separate views) ----
+                            # ---- Step 4b: write B-factor PDBs (peaks=100) + show via viewer ----
                             try:
                                 work_dir = os.path.dirname(save_path)
                                 base = os.path.splitext(os.path.basename(save_path))[0]
-                                residues_in_order = _parse_ca_residues_in_order(save_path, chain_global)
 
-                                # ---- Closeness peaks ----
+                                # CA order mapping (used for indices->residues)
+                                residues_in_order = _ca_residues_in_order_keys(save_path, chain_global)
+
+                                # -------- Closeness peaks: from closeness_chain_labels.txt (top-N by value) --------
                                 close_labels = os.path.join(work_dir, "closeness_chain_labels.txt")
-                                close_sel = {}
+                                close_peak_keys = set()
                                 if os.path.isfile(close_labels):
-                                    close_sel = _top_from_closeness_chain_labels(close_labels, top_n=30)
-
-                                close_peaks = None
-                                for cand in ["closeness_peaks", "closeness_peaks.txt", "close_peaks", "close_peaks.txt"]:
-                                    p = os.path.join(work_dir, cand)
-                                    if os.path.isfile(p):
-                                        close_peaks = p
-                                        break
-
-                                if (not close_sel) and close_peaks:
-                                    idxs = _read_peak_indices(close_peaks)
-                                    close_sel = _chain_to_resi_from_indices(idxs, residues_in_order)
-
-                                if close_sel:
-                                    close_html = os.path.join(work_dir, f"{base}_closeness_red_peaks.html")
-                                    _show_py3dmol_red_highlight(
-                                        pdb_path=save_path,
-                                        title="Closeness: important residues (RED) on main PDB",
-                                        chain_to_resi=close_sel,
-                                        out_html_path=close_html
-                                    )
-                                    n_close = sum(len(v) for v in close_sel.values())
-                                    print(f"[py3Dmol] Closeness highlighted residues: {n_close}")
+                                    top_chain_resnums = _parse_closeness_chain_labels_top_resnums(close_labels, top_n=30)
+                                    close_peak_keys = _keys_from_chain_resnums(top_chain_resnums, residues_in_order)
                                 else:
-                                    print("Warning: No closeness peak residues could be determined (no parsable closeness output).")
+                                    print("Warning: closeness_chain_labels.txt not found; cannot build closeness peak set.")
 
-                                # ---- Betweenness peaks ----
-                                betw_peaks = None
+                                close_pdb_out = os.path.join(work_dir, f"{base}_CLOSENESS_peaks_bfac.pdb")
+                                if close_peak_keys:
+                                    _write_bfactor_peak_pdb(save_path, close_pdb_out, close_peak_keys, peak_b=100.0, other_b=0.0)
+                                    print(f"[PDB] Wrote closeness peaks B-factor PDB: {close_pdb_out}")
+                                else:
+                                    print("Warning: closeness peak set is empty; skipping closeness PDB write.")
+
+                                # -------- Betweenness peaks: from betweenness_peaks (indices or residue numbers) --------
+                                betw_peaks_path = None
                                 for cand in ["betweenness_peaks", "betweenness_peaks.txt", "betw_peaks", "betw_peaks.txt"]:
                                     p = os.path.join(work_dir, cand)
                                     if os.path.isfile(p):
-                                        betw_peaks = p
+                                        betw_peaks_path = p
                                         break
 
-                                if betw_peaks:
-                                    idxs = _read_peak_indices(betw_peaks)
-                                    betw_sel = _chain_to_resi_from_indices(idxs, residues_in_order)
-
-                                    betw_html = os.path.join(work_dir, f"{base}_betweenness_red_peaks.html")
-                                    _show_py3dmol_red_highlight(
-                                        pdb_path=save_path,
-                                        title="Betweenness: peak residues (RED) on main PDB",
-                                        chain_to_resi=betw_sel,
-                                        out_html_path=betw_html
-                                    )
-                                    n_betw = sum(len(v) for v in betw_sel.values())
-                                    print(f"[py3Dmol] Betweenness highlighted residues: {n_betw}")
+                                betw_peak_keys = set()
+                                if betw_peaks_path:
+                                    betw_ints = _read_all_ints(betw_peaks_path)
+                                    betw_peak_keys = _peaks_to_keys_from_indices_or_resnums(betw_ints, residues_in_order)
                                 else:
-                                    print("Warning: betweenness_peaks file not found; cannot highlight betweenness peaks.")
+                                    print("Warning: betweenness_peaks file not found; cannot build betweenness peak set.")
 
-                            except Exception as e_vis:
-                                print(f"Warning: py3Dmol peak visualization failed: {e_vis}")
+                                betw_pdb_out = os.path.join(work_dir, f"{base}_BETWEENNESS_peaks_bfac.pdb")
+                                if betw_peak_keys:
+                                    _write_bfactor_peak_pdb(save_path, betw_pdb_out, betw_peak_keys, peak_b=100.0, other_b=0.0)
+                                    print(f"[PDB] Wrote betweenness peaks B-factor PDB: {betw_pdb_out}")
+                                else:
+                                    print("Warning: betweenness peak set is empty; skipping betweenness PDB write.")
+
+                                # -------- PyMOL script (real PyMOL) --------
+                                if close_peak_keys and betw_peak_keys:
+                                    pml_path = os.path.join(work_dir, f"{base}_peaks_bfac_views.pml")
+                                    _write_pymol_pml(pml_path, close_pdb_out, betw_pdb_out)
+                                    print(f"[PyMOL] Wrote script: {pml_path}")
+                                    print(f"[PyMOL] Run: pymol {pml_path}")
+
+                                # -------- Show in notebook (viewer reads B-factors and paints RED) --------
+                                if os.path.isfile(close_pdb_out):
+                                    _view_bfactor_pdb_py3dmol(close_pdb_out, "Closeness peaks (B=100 -> RED)")
+
+                                if os.path.isfile(betw_pdb_out):
+                                    _view_bfactor_pdb_py3dmol(betw_pdb_out, "Betweenness peaks (B=100 -> RED)")
+
+                            except Exception as e_bfac:
+                                print(f"Warning: B-factor peak PDB generation/view failed: {e_bfac}")
+
 
                         finally:
                             os.chdir(old_cwd2)
