@@ -788,5 +788,5 @@ def launch(
                 _view_bfactor_pdb_py3dmol(pdb_path, title, sphere_radius=radius, show_sticks=sticks)
 
 
-btn_new_job.on_click(on_new_job)
-btn_submit.on_click(on_submit)
+    btn_new_job.on_click(on_new_job)
+    btn_submit.on_click(on_submit)
