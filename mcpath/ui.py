@@ -128,6 +128,31 @@ def _read_all_ints(path: str):
                 except Exception:
                     pass
     return ints
+from IPython.display import HTML, FileLink  # at top is OK too
+
+_RESCHAIN_RE = re.compile(r"\b(\d+)\s*([A-Za-z0-9])\b")  # matches 16A, 1913Q, also "16 A"
+
+def _parse_reschain_pairs(path: str):
+    """
+    Extract (chain, resnum) pairs from lines like:
+      16A  -> closeness = ...
+      1913Q -> ...
+    """
+    pairs = []
+    with open(path, "r", encoding="utf-8", errors="ignore") as f:
+        for line in f:
+            m = _RESCHAIN_RE.search(line)
+            if not m:
+                continue
+            rn = int(m.group(1))
+            ch = m.group(2)
+            pairs.append((ch, rn))
+    return pairs
+
+def _show_download(path: str, label: str = "file"):
+    """Clickable download link in notebook output."""
+    display(HTML(f"<b>Download {label}:</b>"))
+    display(FileLink(path))
 
 def _parse_closeness_chain_labels_top_resnums(labels_path: str, top_n: int = 30):
     """
