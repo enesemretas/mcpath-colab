@@ -8,6 +8,14 @@ _FORM_ROOT = None
 _LOG_OUT   = None
 
 # -------------------- validators & helpers --------------------
+def _enable_colab_widgets():
+    try:
+        from google.colab import output
+        output.enable_custom_widget_manager()
+    except Exception:
+        pass
+
+
 def _is_valid_pdb_code(c):
     return bool(re.fullmatch(r"[0-9A-Za-z]{4}", c.strip()))
 
@@ -382,13 +390,11 @@ def _colab_iframe_src(html_path: str) -> str:
 
 
 def _view_bfactor_pdb_py3dmol(pdb_path: str, title: str, sphere_radius: float = 0.9, show_sticks: bool = False):
-    """
-    Always render via IFrame (robust inside ipywidgets.Output in Colab).
-    No download links.
-    """
     if not _ensure_py3dmol():
         print("Warning: py3Dmol not available; skipping viewer.")
         return
+
+    _enable_colab_widgets()  # safe to call repeatedly
 
     import py3Dmol
 
@@ -409,15 +415,8 @@ def _view_bfactor_pdb_py3dmol(pdb_path: str, title: str, sphere_radius: float = 
 
     view.zoomTo()
     display(HTML(f"<b>{title}</b>"))
+    view.show()
 
-    # Write HTML into /content so Colab can serve it at /files/...
-    base = os.path.splitext(os.path.basename(pdb_path))[0]
-    html_path = f"/content/{base}_py3dmol_{uuid.uuid4().hex}.html"
-
-    with open(html_path, "w", encoding="utf-8") as f:
-        f.write(view._make_html())
-
-    display(IFrame(src=_colab_iframe_src(html_path), width=870, height=560))
 
 
 def _write_pymol_pml(pml_path: str, pdb_close: str, pdb_betw: str):
@@ -510,6 +509,8 @@ def launch(
 ):
     global _FORM_ROOT, _LOG_OUT
 
+    _enable_colab_widgets()
+    
     cfg = yaml.safe_load(requests.get(defaults_url, timeout=30).text)
     target_url = cfg.get("target_url", "").strip()
     FN = cfg["field_names"]
