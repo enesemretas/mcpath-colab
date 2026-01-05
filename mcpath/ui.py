@@ -62,6 +62,21 @@ def _progress(step: int, total: int, message: str):
 # -------------------- py3Dmol helpers (top residues in red) --------------------
 _NUM_RE = re.compile(r"[-+]?(?:\d*\.\d+|\d+)(?:[eE][-+]?\d+)?")
 
+def _ensure_py3dmol():
+    try:
+        import py3Dmol  # noqa: F401
+        return True
+    except Exception:
+        try:
+            import subprocess, sys
+            subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", "py3Dmol"])
+            import py3Dmol  # noqa: F401
+            return True
+        except Exception as e:
+            print(f"Warning: py3Dmol not available and install failed: {e}")
+            return False
+
+
 def _parse_chain_tokens(chain_str: str):
     chain_str = (chain_str or "").strip()
     if not chain_str:
@@ -144,9 +159,11 @@ def _read_metric_file(metric_path: str):
 
     return seq_vals
 
-def _find_latest_metric_file(work_dir: str, kind: str):
+def _find_best_metric_file(work_dir: str, kind: str, min_numeric: int = 20):
     """
-    Attempts to autodetect the newest closeness/betweenness output file in work_dir.
+    Finds the most likely metric file by picking the candidate that yields
+    the largest number of numeric values when parsed.
+    This avoids selecting label/peaks files.
     """
     kind = kind.lower()
     if kind == "closeness":
@@ -168,11 +185,24 @@ def _find_latest_metric_file(work_dir: str, kind: str):
         and (p.lower().endswith(exts) or os.path.splitext(p)[1] == "")
         and not p.lower().endswith((".py", ".pml", ".pse", ".png", ".jpg", ".jpeg"))
     ]
-
     if not cands:
         return None
-    cands.sort(key=lambda p: os.path.getmtime(p), reverse=True)
-    return cands[0]
+
+    best = None
+    best_n = -1
+    for p in sorted(cands, key=lambda x: os.path.getmtime(x), reverse=True):
+        try:
+            vals = _read_metric_file(p)
+            n = sum(1 for v in vals if (v == v))  # count non-NaN
+            if n > best_n:
+                best, best_n = p, n
+        except Exception:
+            continue
+
+    if best_n < min_numeric:
+        return None
+    return best
+
 
 def _top_residues_from_metric(pdb_path: str, metric_path: str, chain_str: str, top_n: int = 30):
     residues = _parse_ca_residues_in_order(pdb_path, chain_str)
@@ -204,12 +234,11 @@ def _group_resi_by_chain(top_rows):
     return {ch: sorted(list(s)) for ch, s in out.items()}
 
 def _show_py3dmol_highlight(pdb_path: str, title: str, chain_to_resi: dict, width=600, height=420):
-    try:
-        import py3Dmol
-        from IPython.display import display as _display
-    except Exception as e:
-        print(f"Warning: py3Dmol not available: {e}")
+    if not _ensure_py3dmol():
         return
+
+    import py3Dmol
+    from IPython.display import display as _display
 
     pdb_text = open(pdb_path, "r", encoding="utf-8", errors="ignore").read()
 
@@ -229,6 +258,7 @@ def _show_py3dmol_highlight(pdb_path: str, title: str, chain_to_resi: dict, widt
     view.zoomTo()
     _display(W.HTML(f"<b>{title}</b>"))
     view.show()
+
 
 
 
@@ -609,21 +639,21 @@ def launch(
                            
                             # ---- Step 4b: py3Dmol visualization (top residues in RED) ----
                             try:
-                                top_n_vis = 30  # change if you want (e.g., 20 / 50)
+                                top_n_vis = 30  # change if you want
 
-                                close_out = _find_latest_metric_file(work_dir, "closeness")
-                                betw_out  = _find_latest_metric_file(work_dir, "betweenness")
+                                close_out = _find_best_metric_file(work_dir, "closeness", min_numeric=20)
+                                betw_out  = _find_best_metric_file(work_dir, "betweenness", min_numeric=20)
 
                                 if not close_out:
-                                    print("Warning: Could not find closeness output file for visualization.")
+                                    print("Warning: Could not find a valid closeness metric file for visualization.")
                                 if not betw_out:
-                                    print("Warning: Could not find betweenness output file for visualization.")
+                                    print("Warning: Could not find a valid betweenness metric file for visualization.")
 
                                 if close_out:
                                     close_top = _top_residues_from_metric(
                                         pdb_path=save_path,
                                         metric_path=close_out,
-                                        chain_str=chain_global,   # "" means all chains
+                                        chain_str=chain_global,
                                         top_n=top_n_vis
                                     )
                                     close_sel = _group_resi_by_chain(close_top)
@@ -632,7 +662,7 @@ def launch(
                                         title=f"Closeness: Top {top_n_vis} residues (RED)",
                                         chain_to_resi=close_sel
                                     )
-                                    print(f"[py3Dmol] Closeness file: {os.path.basename(close_out)}")
+                                    print(f"[py3Dmol] Closeness metric: {os.path.basename(close_out)}")
 
                                 if betw_out:
                                     betw_top = _top_residues_from_metric(
@@ -647,7 +677,7 @@ def launch(
                                         title=f"Betweenness: Top {top_n_vis} residues (RED)",
                                         chain_to_resi=betw_sel
                                     )
-                                    print(f"[py3Dmol] Betweenness file: {os.path.basename(betw_out)}")
+                                    print(f"[py3Dmol] Betweenness metric: {os.path.basename(betw_out)}")
 
                             except Exception as e_vis:
                                 print(f"Warning: py3Dmol visualization failed: {e_vis}")
