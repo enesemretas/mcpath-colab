@@ -71,7 +71,8 @@ def _find_first_existing(work_dir: str, candidates):
 # -------------------- Peak -> B-factor PDB + viewer helpers --------------------
 _NUM_RE = re.compile(r"[-+]?(?:\d*\.\d+|\d+)(?:[eE][-+]?\d+)?")
 # matches "16A", "1913Q", and also "16 A"
-_RESCHAIN_RE = re.compile(r"\b(\d+)\s*([A-Za-z0-9])\b")
+
+_RESCHAIN_RE = re.compile(r"\b(\d+)\s*([A-Za-z0-9]+)\b")
 
 def _ensure_py3dmol():
     try:
@@ -179,38 +180,67 @@ def _parse_chain_resnum_value_lines(path: str):
 
 def _build_chain_maps(residues_in_order):
     """
-    Build per-chain ordered lists and residue-number sets for auto-detection.
+    Build per-chain ordered lists and residue-number sets for auto-detection,
+    AND preserve chain appearance order (needed for numeric-chain mapping).
     """
     chain_to_ordered = {}
     chain_to_resnums = {}
+    chain_order = []
+
     for r in residues_in_order:
         ch = r["chain"]
-        chain_to_ordered.setdefault(ch, []).append((r["resi_raw"], r["resi_num"]))
+        if ch not in chain_to_ordered:
+            chain_to_ordered[ch] = []
+            chain_order.append(ch)  # first-seen order in the PDB/selection
+        chain_to_ordered[ch].append((r["resi_raw"], r["resi_num"]))
         if r["resi_num"] is not None:
             chain_to_resnums.setdefault(ch, set()).add(r["resi_num"])
-    return chain_to_ordered, chain_to_resnums
+
+    return chain_to_ordered, chain_to_resnums, chain_order
+
+def _normalize_chain_token(ch, chain_to_ordered, chain_order):
+    """
+    Convert numeric chain tokens ("1","2",...) into actual PDB chain IDs ("A","B",...)
+    based on chain order in residues_in_order.
+
+    If the PDB really has a chain named "1", we keep it as-is.
+    """
+    ch = str(ch).strip()
+    if ch in chain_to_ordered:
+        return ch
+
+    if ch.isdigit():
+        idx = int(ch)
+        if 1 <= idx <= len(chain_order):
+            return chain_order[idx - 1]
+
+    return ch
 
 def _pairs_to_peak_keys_auto(pairs, residues_in_order):
     """
     AUTO-DETECT for each chain whether numbers are:
       - PDB residue numbers (resi_num)
       - OR 1-based indices into that chain's CA list
+
+    Also supports peaks files where chain is given as numeric index (1,2,3,...).
     Returns peak_keys = {(chain, resi_raw), ...}
     """
     if not pairs:
         return set()
 
-    chain_to_ordered, chain_to_resnums = _build_chain_maps(residues_in_order)
+    chain_to_ordered, chain_to_resnums, chain_order = _build_chain_maps(residues_in_order)
 
-    # group numbers per chain
+    # group numbers per chain (after normalizing chain token)
     per_chain = {}
     for ch, n in pairs:
-        per_chain.setdefault(ch, []).append(int(n))
+        ch_norm = _normalize_chain_token(ch, chain_to_ordered, chain_order)
+        per_chain.setdefault(ch_norm, []).append(int(n))
 
     peak_keys = set()
 
     for ch, nums in per_chain.items():
         if ch not in chain_to_ordered:
+            # still unknown chain after normalization
             continue
 
         ordered = chain_to_ordered[ch]  # list of (resi_raw, resi_num)
@@ -221,16 +251,15 @@ def _pairs_to_peak_keys_auto(pairs, residues_in_order):
         as_resnum = sum(1 for x in nums if x in resnum_set)
         as_index  = sum(1 for x in nums if 1 <= x <= L)
 
+        # IMPORTANT: tie-break goes to "resnum" (safer when both look plausible)
         use_index = (as_index > as_resnum)
 
         if use_index:
-            # treat x as 1-based index into chain CA order
             for x in nums:
                 if 1 <= x <= L:
                     resi_raw, _ = ordered[x - 1]
                     peak_keys.add((ch, resi_raw))
         else:
-            # treat x as PDB residue number
             want = set(nums)
             for resi_raw, resi_num in ordered:
                 if resi_num in want:
