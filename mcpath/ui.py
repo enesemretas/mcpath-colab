@@ -249,7 +249,7 @@ def _write_bfactor_peak_pdb(pdb_in: str, pdb_out: str, peak_keys: set,
     with open(pdb_in, "r", encoding="utf-8", errors="ignore") as fin, \
          open(pdb_out, "w", encoding="utf-8") as fout:
         for line in fin:
-            if line.startswith(("ATOM", "HETATM")):
+            if line.startswith("ATOM"):
                 ch = line[21].strip()
                 resi = line[22:26].strip()
                 icode = line[26].strip()
@@ -387,7 +387,10 @@ scene betweenness, store
 
 # Tip: Scene menu -> recall closeness / betweenness
 """
-    os.makedir
+    os.makedirs(os.path.dirname(pml_path) or ".", exist_ok=True)
+    with open(pml_path, "w", encoding="utf-8") as f:
+        f.write(pml.strip() + "\n")
+    return pml_path
 
 
 
