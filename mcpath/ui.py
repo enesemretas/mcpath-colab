@@ -877,9 +877,12 @@ def launch(
                                 if betw_peak_keys:
                                     _write_bfactor_peak_pdb(save_path, betw_pdb_out, betw_peak_keys, peak_b=100.0, other_b=0.0)
                                     print(f"[PDB] Wrote betweenness peaks B-factor PDB: {betw_pdb_out}")
-                                    _view_bfactor_pdb_py3dmol(betw_pdb_out, "Betweenness peaks (B=100 → RED spheres)", sphere_radius=0.9, show_sticks=False)
+                                    viewers.append((betw_pdb_out, "Betweenness peaks (B=100 → RED spheres)", 0.9, False))
                                 else:
                                     print("Warning: betweenness peak set is empty; skipping betweenness PDB write.")
+
+                            except Exception as e_bfac:
+                                print(f"Warning: B-factor peak PDB generation failed: {e_bfac}")
 
                                 # -------- PyMOL script if both exist --------
                                 if close_peak_keys and betw_peak_keys:
@@ -938,5 +941,16 @@ def launch(
             except Exception as e:
                 print("Error:", e)
 
+    except Exception as e_outer:
+        with _LOG_OUT:
+            print("Error:", e_outer)
+
+    # --- IMPORTANT: render py3Dmol OUTSIDE the ipywidgets.Output capture ---
+    if viewers:
+        display(HTML("<hr><h4>3D Views</h4>"))
+        for (pdb_path, title, radius, sticks) in viewers:
+            _view_bfactor_pdb_py3dmol(pdb_path, title, sphere_radius=radius, show_sticks=sticks)
+
+    
     btn_new_job.on_click(on_new_job)
     btn_submit.on_click(on_submit)
