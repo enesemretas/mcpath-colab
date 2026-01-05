@@ -394,8 +394,6 @@ def _view_bfactor_pdb_py3dmol(pdb_path: str, title: str, sphere_radius: float = 
         print("Warning: py3Dmol not available; skipping viewer.")
         return
 
-    _enable_colab_widgets()  # safe to call repeatedly
-
     import py3Dmol
 
     pdb_text = open(pdb_path, "r", encoding="utf-8", errors="ignore").read()
@@ -416,6 +414,7 @@ def _view_bfactor_pdb_py3dmol(pdb_path: str, title: str, sphere_radius: float = 
     view.zoomTo()
     display(HTML(f"<b>{title}</b>"))
     view.show()
+
 
 
 
@@ -842,9 +841,11 @@ def launch(
                                 if close_peak_keys:
                                     _write_bfactor_peak_pdb(save_path, close_pdb_out, close_peak_keys, peak_b=100.0, other_b=0.0)
                                     print(f"[PDB] Wrote closeness peaks B-factor PDB: {close_pdb_out}")
-                                    _view_bfactor_pdb_py3dmol(close_pdb_out, "Closeness peaks (B=100 → RED spheres)", sphere_radius=0.9, show_sticks=False)
+                                    # DO NOT call viewer here; queue it
+                                    viewers.append((close_pdb_out, "Closeness peaks (B=100 → RED spheres)", 0.9, False))
                                 else:
                                     print("Warning: closeness peak set is empty; skipping closeness PDB write.")
+
 
                                 # -------- BETWEENNESS peaks: parse chain+number; fallback to pure ints; auto-map --------
                                 betw_peak_keys = set()
