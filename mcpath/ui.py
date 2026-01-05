@@ -1,27 +1,30 @@
 # mcpath/ui.py
 import os, re, requests, yaml, importlib, shutil, sys, glob, subprocess
-from IPython.display import display, clear_output, HTML, IFrame
+from IPython.display import display, clear_output, HTML
 import ipywidgets as W
 
 # ---------- singletons (so New Job/Submit always uses the same log panel) ----------
 _FORM_ROOT = None
 _LOG_OUT   = None
 
-# -------------------- validators & helpers --------------------
+# -------------------- Colab widgets enabling --------------------
 def _enable_colab_widgets():
+    """
+    Enables JS widget rendering in Google Colab (safe to call anywhere).
+    """
     try:
         from google.colab import output
         output.enable_custom_widget_manager()
     except Exception:
         pass
 
-
+# -------------------- validators & helpers --------------------
 def _is_valid_pdb_code(c):
     return bool(re.fullmatch(r"[0-9A-Za-z]{4}", c.strip()))
 
 def _is_valid_chain(ch):
     """Single-chain validator (for init/final chains etc.)."""
-    return bool(re.fullmatch(r"[A-Za-z0-9]", ch.strip()))
+    return bool(re.fullmatch(r"[A-Za-z0-9]", (ch or "").strip()))
 
 def _is_valid_chain_list(ch_str: str) -> bool:
     """
@@ -40,7 +43,7 @@ def _is_valid_chain_list(ch_str: str) -> bool:
     return all(_is_valid_chain(tok) for tok in tokens)
 
 def _is_valid_email(s):
-    return (not s.strip()) or bool(re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", s.strip()))
+    return (not (s or "").strip()) or bool(re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", (s or "").strip()))
 
 def _fetch_rcsb(code: str) -> bytes:
     url = f"https://files.rcsb.org/download/{code.upper()}.pdb"
@@ -56,7 +59,7 @@ def _logo_widget(branding: dict):
     align  = (branding.get("logo_align") or "center").lower()
     try:
         img_bytes = requests.get(url, timeout=20).content
-        jc = {"center":"center", "left":"flex-start", "right":"flex-end"}.get(align, "center")
+        jc = {"center": "center", "left": "flex-start", "right": "flex-end"}.get(align, "center")
         return W.HBox([W.Image(value=img_bytes, format="png", layout=W.Layout(height=f"{height}px"))],
                       layout=W.Layout(justify_content=jc))
     except Exception:
@@ -78,8 +81,7 @@ def _find_first_existing(work_dir: str, candidates):
 
 # -------------------- Peak -> B-factor PDB + viewer helpers --------------------
 _NUM_RE = re.compile(r"[-+]?(?:\d*\.\d+|\d+)(?:[eE][-+]?\d+)?")
-# matches "16A", "1913Q", and also "16 A"
-
+# Matches lines like "16 A ..." or "16 1 ..." or "16A ..." (but for tabular peaks file we care about "16 1")
 _RESCHAIN_RE = re.compile(r"\b(\d+)\s*([A-Za-z0-9]+)\b")
 
 def _ensure_py3dmol():
@@ -163,9 +165,10 @@ def _parse_reschain_pairs(path: str):
 
 def _parse_chain_resnum_value_lines(path: str):
     """
-    Parse lines containing e.g.:
-      16A -> closeness = 0.184519
-    Returns list of (value, chain, number)
+    Parse lines containing e.g. tabular format:
+      16   1   16.1   0.349624
+    Returns list of (value, chainToken, resnum)
+      -> (0.349624, '1', 16)
     """
     rows = []
     with open(path, "r", encoding="utf-8", errors="ignore") as f:
@@ -211,17 +214,15 @@ def _normalize_chain_token(ch, chain_to_ordered, chain_order):
     Convert numeric chain tokens ("1","2",...) into actual PDB chain IDs ("A","B",...)
     based on chain order in residues_in_order.
 
-    If the PDB really has a chain named "1", we keep it as-is.
+    If the PDB really has a chain named "1", keep it as-is.
     """
     ch = str(ch).strip()
     if ch in chain_to_ordered:
         return ch
-
     if ch.isdigit():
         idx = int(ch)
         if 1 <= idx <= len(chain_order):
             return chain_order[idx - 1]
-
     return ch
 
 def _pairs_to_peak_keys_auto(pairs, residues_in_order):
@@ -230,7 +231,7 @@ def _pairs_to_peak_keys_auto(pairs, residues_in_order):
       - PDB residue numbers (resi_num)
       - OR 1-based indices into that chain's CA list
 
-    Also supports peaks files where chain is given as numeric index (1,2,3,...).
+    Also supports peaks files where chain is numeric index (1,2,3,...).
     Returns peak_keys = {(chain, resi_raw), ...}
     """
     if not pairs:
@@ -238,7 +239,6 @@ def _pairs_to_peak_keys_auto(pairs, residues_in_order):
 
     chain_to_ordered, chain_to_resnums, chain_order = _build_chain_maps(residues_in_order)
 
-    # group numbers per chain (after normalizing chain token)
     per_chain = {}
     for ch, n in pairs:
         ch_norm = _normalize_chain_token(ch, chain_to_ordered, chain_order)
@@ -248,18 +248,16 @@ def _pairs_to_peak_keys_auto(pairs, residues_in_order):
 
     for ch, nums in per_chain.items():
         if ch not in chain_to_ordered:
-            # still unknown chain after normalization
             continue
 
         ordered = chain_to_ordered[ch]  # list of (resi_raw, resi_num)
         resnum_set = chain_to_resnums.get(ch, set())
         L = len(ordered)
 
-        # count how many look like resnums vs indices
         as_resnum = sum(1 for x in nums if x in resnum_set)
         as_index  = sum(1 for x in nums if 1 <= x <= L)
 
-        # IMPORTANT: tie-break goes to "resnum" (safer when both look plausible)
+        # tie-break goes to residue-number interpretation (safer)
         use_index = (as_index > as_resnum)
 
         if use_index:
@@ -289,7 +287,6 @@ def _ints_to_peak_keys_auto(ints_list, residues_in_order):
         return set()
 
     leN = sum(1 for x in ints_list if 1 <= x <= N)
-    # if most ints are <= N, likely indices
     if leN >= max(1, int(0.7 * len(ints_list))):
         keys = set()
         for idx in ints_list:
@@ -298,7 +295,6 @@ def _ints_to_peak_keys_auto(ints_list, residues_in_order):
                 keys.add((r["chain"], r["resi_raw"]))
         return keys
 
-    # else: residue numbers without chain -> mark any chain matching that resi_num
     want_nums = set(ints_list)
     keys = set()
     for r in residues_in_order:
@@ -367,35 +363,17 @@ def _extract_peak_resis_from_bfactor_pdb(pdb_path: str, b_threshold: float = 50.
 
     return {ch: sorted(list(s)) for ch, s in out.items()}
 
-def _iframe_src_for(path: str) -> str:
-    ap = os.path.abspath(path)
-    # Colab serves /content via /files/
-    if ap.startswith("/content/"):
-        rel = ap[len("/content/"):].lstrip("/")
-        return f"/files/{rel}"
-    # fallback
-    return ap
-
-
-import uuid
-
-def _colab_iframe_src(html_path: str) -> str:
-    ap = os.path.abspath(html_path)
-    # Colab serves /content via /files/
-    if ap.startswith("/content/"):
-        rel = ap[len("/content/"):].lstrip("/")
-        return f"/files/{rel}"
-    # fallback (shouldn't happen if we write to /content)
-    return ap
-
-
 def _view_bfactor_pdb_py3dmol(pdb_path: str, title: str, sphere_radius: float = 0.9, show_sticks: bool = False):
+    """
+    IMPORTANT: Call this OUTSIDE ipywidgets.Output capture, or py3Dmol may appear blank.
+    """
     if not _ensure_py3dmol():
         print("Warning: py3Dmol not available; skipping viewer.")
         return
 
-    import py3Dmol
+    _enable_colab_widgets()
 
+    import py3Dmol
     pdb_text = open(pdb_path, "r", encoding="utf-8", errors="ignore").read()
     peaks = _extract_peak_resis_from_bfactor_pdb(pdb_path, b_threshold=50.0)
 
@@ -414,9 +392,6 @@ def _view_bfactor_pdb_py3dmol(pdb_path: str, title: str, sphere_radius: float = 
     view.zoomTo()
     display(HTML(f"<b>{title}</b>"))
     view.show()
-
-
-
 
 def _write_pymol_pml(pml_path: str, pdb_close: str, pdb_betw: str):
     pml = f"""
@@ -509,7 +484,7 @@ def launch(
     global _FORM_ROOT, _LOG_OUT
 
     _enable_colab_widgets()
-    
+
     cfg = yaml.safe_load(requests.get(defaults_url, timeout=30).text)
     target_url = cfg.get("target_url", "").strip()
     FN = cfg["field_names"]
@@ -675,118 +650,278 @@ def launch(
             k += 1
 
     def on_submit(_):
-        viewers = []  # <-- IMPORTANT: define here
+        viewers = []  # render OUTSIDE ipywidgets.Output capture: (pdb_path, title, radius, sticks)
 
         _LOG_OUT.clear_output(wait=True)
 
-        try:
-            with _LOG_OUT:
-                try:
-                    total_steps = 5
+        with _LOG_OUT:
+            try:
+                total_steps = 5
 
-                    # -----------------------------
-                    # your existing code (Steps 1–4)
-                    # -----------------------------
+                chain_global_raw = chain_id.value.strip()
+                if chain_global_raw and (not _is_valid_chain_list(chain_global_raw)):
+                    raise ValueError("Chain ID must be empty (all chains) or a comma-separated list of single characters (e.g., A or A,B).")
+                chain_global = chain_global_raw  # may be ""
 
-                    # -------- Step 4b: write B-factor PDBs (QUEUE viewers, do not show here) --------
+                if not _is_valid_email(email.value.strip()):
+                    raise ValueError("Invalid email format.")
+
+                pdb_bytes, pdb_name = _collect_pdb_bytes()
+                save_path = os.path.join(SAVE_DIR, pdb_name)
+                with open(save_path, "wb") as f:
+                    f.write(pdb_bytes)
+
+                input_path = os.path.join(os.path.dirname(save_path), "mcpath_input.txt")
+                mode = pred_type.value
+
+                if mode == "functional":
+                    rows = ["1", pdb_name, chain_global, str(get_big_len()), (email.value.strip() or "-")]
+                elif mode == "paths_init_len":
+                    if not _is_valid_chain(init_chain.value or ""):
+                        raise ValueError("Chain of initial residue must be a single character.")
+                    rows = ["2", pdb_name, chain_global, str(get_short_len()), str(get_num_paths_2()),
+                            str(int(init_idx.value)), (init_chain.value or "").strip(), (email.value.strip() or "-")]
+                else:
+                    if not _is_valid_chain(init_chain.value or ""):
+                        raise ValueError("Chain of initial residue must be a single character.")
+                    if not _is_valid_chain(final_chain.value or ""):
+                        raise ValueError("Chain of final residue must be a single character.")
+                    rows = ["3", pdb_name, chain_global,
+                            str(int(init_idx.value)), (init_chain.value or "").strip(),
+                            str(int(final_idx.value)), (final_chain.value or "").strip(),
+                            (email.value.strip() or "-")]
+
+                with open(input_path, "w") as f:
+                    for r in rows:
+                        f.write(str(r).strip() + "\n")
+
+                _progress(1, total_steps, "Input validated and PDB saved.")
+
+                run_readpdb = _try_import_readpdb()
+                cor_path = None
+                if run_readpdb is None:
+                    print("Warning: readpdb_strict not found; skipping .cor generation.")
+                else:
                     try:
-                        base = os.path.splitext(os.path.basename(save_path))[0]
-                        residues_in_order = _ca_residues_in_order(save_path, chain_str=chain_global)
+                        cor_path = run_readpdb(input_path=input_path)
+                    except TypeError:
+                        cor_path = run_readpdb(pdb_path=save_path, chain=(chain_global or "A"))
 
-                        # ---- CLOSENESS ----
-                        close_peak_keys = set()
-                        close_src = _find_first_existing(work_dir, [
-                            "closeness_peaks", "closeness_peaks.txt",
-                            "closeness_chain_labels.txt"
-                        ])
-                        if close_src:
-                            rows = _parse_chain_resnum_value_lines(close_src)
-                            if rows:
-                                rows.sort(key=lambda x: x[0], reverse=True)
-                                pairs = [(ch, n) for (val, ch, n) in rows[:30]]
-                            else:
-                                pairs = _parse_reschain_pairs(close_src)
+                    if cor_path and os.path.isfile(cor_path):
+                        _progress(2, total_steps, ".cor coordinate file generated.")
+                    else:
+                        print("Warning: .cor file was not generated or not found.")
 
-                            close_peak_keys = _pairs_to_peak_keys_auto(pairs, residues_in_order)
-                            print(f"[closeness] parsed {len(pairs)} peaks from {os.path.basename(close_src)} -> mapped {len(close_peak_keys)} residues")
+                # -------- Step 3: atomistic LJ --------
+                try:
+                    if cor_path and os.path.isfile(cor_path):
+                        base_no_ext = os.path.splitext(save_path)[0]
+                        want_cor = f"{base_no_ext}.cor"
+                        if os.path.abspath(cor_path) != os.path.abspath(want_cor):
+                            shutil.copyfile(cor_path, want_cor)
+
+                        here = os.path.dirname(os.path.abspath(__file__))
+                        param_path = os.path.join(here, "vdw_cns.param")
+                        top_path   = os.path.join(here, "pdb_cns.top")
+
+                        if not (os.path.isfile(param_path) and os.path.isfile(top_path)):
+                            print("Warning: vdw_cns.param or pdb_cns.top missing; skipping atomistic LJ step.")
                         else:
-                            print("Warning: no closeness peaks file found.")
+                            pkg_dir = os.path.dirname(os.path.abspath(__file__))
+                            root_dir = os.path.dirname(pkg_dir)
+                            if root_dir not in sys.path:
+                                sys.path.append(root_dir)
 
-                        close_pdb_out = os.path.join(work_dir, f"{base}_CLOSENESS_peaks_bfac.pdb")
-                        if close_peak_keys:
-                            _write_bfactor_peak_pdb(save_path, close_pdb_out, close_peak_keys, peak_b=100.0, other_b=0.0)
-                            print(f"[PDB] Wrote closeness peaks B-factor PDB: {close_pdb_out}")
-                            viewers.append((close_pdb_out, "Closeness peaks (B=100 → RED spheres)", 0.9, False))
-                        else:
-                            print("Warning: closeness peak set is empty; skipping closeness PDB write.")
+                            atom_mod = importlib.import_module("mcpath.atomistic")
+                            importlib.reload(atom_mod)
 
-                        # ---- BETWEENNESS ----
-                        betw_peak_keys = set()
-                        betw_src = _find_first_existing(work_dir, [
-                            "betweenness_peaks", "betweenness_peaks.txt",
-                            "betw_peaks", "betw_peaks.txt",
-                            "betweenness_chain_labels.txt"
-                        ])
-                        if betw_src:
-                            rows = _parse_chain_resnum_value_lines(betw_src)
-                            if rows:
-                                rows.sort(key=lambda x: x[0], reverse=True)
-                                pairs = [(ch, n) for (val, ch, n) in rows[:30]]
-                                betw_peak_keys = _pairs_to_peak_keys_auto(pairs, residues_in_order)
-                                print(f"[betweenness] parsed {len(pairs)} peaks from {os.path.basename(betw_src)} -> mapped {len(betw_peak_keys)} residues")
+                            base_for_atom = os.path.splitext(save_path)[0]
+                            atom_mod.atomistic(
+                                base_for_atom,
+                                param_file=param_path,
+                                top_file=top_path,
+                                rcut=5.0,
+                                kT=1.0,
+                                save_txt=True
+                            )
+                            _progress(3, total_steps, "Atomistic LJ calculation completed.")
+                    else:
+                        print("Warning: No .cor available; skipping atomistic LJ step.")
+                except Exception as e:
+                    print(f"Warning: atomistic run failed: {e}")
+
+                # -------- Step 4: infinite path + closeness/betweenness --------
+                work_dir = os.path.dirname(save_path)
+
+                if mode == "functional" and cor_path and os.path.isfile(cor_path):
+                    try:
+                        inf_mod = importlib.import_module("mcpath.infinite")
+                        importlib.reload(inf_mod)
+
+                        old_cwd = os.getcwd()
+                        try:
+                            os.chdir(work_dir)
+                            steps = int(get_big_len())
+                            path_arr = inf_mod.infinite(
+                                os.path.basename(os.path.splitext(save_path)[0]),
+                                path_length=steps,
+                                pottype='1'
+                            )
+                            pl = path_arr.shape[1]
+                            path_src = f"{os.path.basename(os.path.splitext(save_path)[0])}_atomistic_{pl}steps_infinite.path"
+                            path_src = os.path.join(work_dir, path_src)
+                        finally:
+                            os.chdir(old_cwd)
+
+                        cor_src  = f"{os.path.splitext(save_path)[0]}.cor"
+                        atom_src = f"{os.path.splitext(save_path)[0]}_atomistic.out"
+
+                        _copy_unique(cor_src,  "coor_file", work_dir=os.path.dirname(cor_src))
+                        _copy_unique(atom_src, "atom_file", work_dir=os.path.dirname(atom_src))
+                        _copy_unique(path_src, "path_file", work_dir=os.path.dirname(path_src))
+
+                        close_mod = importlib.import_module("mcpath.closeness")
+                        importlib.reload(close_mod)
+
+                        betw_mod = importlib.import_module("mcpath.betweenness")
+                        importlib.reload(betw_mod)
+
+                        old_cwd2 = os.getcwd()
+                        try:
+                            os.chdir(work_dir)
+                            close_mod.main()
+                            betw_mod.main()
+                        finally:
+                            os.chdir(old_cwd2)
+
+                        # ---- Step 4b: write B-factor PDBs (QUEUE viewers; do not render here) ----
+                        try:
+                            base = os.path.splitext(os.path.basename(save_path))[0]
+
+                            residues_in_order = _ca_residues_in_order(save_path, chain_str=chain_global)
+
+                            # --- CLOSENESS ---
+                            close_peak_keys = set()
+                            close_src = _find_first_existing(work_dir, [
+                                "closeness_peaks", "closeness_peaks.txt",
+                                "closeness_chain_labels.txt"
+                            ])
+                            if close_src:
+                                rows = _parse_chain_resnum_value_lines(close_src)
+                                if rows:
+                                    rows.sort(key=lambda x: x[0], reverse=True)
+                                    pairs = [(ch, n) for (val, ch, n) in rows[:30]]
+                                else:
+                                    pairs = _parse_reschain_pairs(close_src)
+
+                                close_peak_keys = _pairs_to_peak_keys_auto(pairs, residues_in_order)
+                                print(f"[closeness] parsed {len(pairs)} peaks from {os.path.basename(close_src)} -> mapped {len(close_peak_keys)} residues")
                             else:
-                                pairs = _parse_reschain_pairs(betw_src)
-                                if pairs:
+                                print("Warning: no closeness peaks file found.")
+
+                            close_pdb_out = os.path.join(work_dir, f"{base}_CLOSENESS_peaks_bfac.pdb")
+                            if close_peak_keys:
+                                _write_bfactor_peak_pdb(save_path, close_pdb_out, close_peak_keys, peak_b=100.0, other_b=0.0)
+                                print(f"[PDB] Wrote closeness peaks B-factor PDB: {close_pdb_out}")
+                                viewers.append((close_pdb_out, "Closeness peaks (B=100 → RED spheres)", 0.9, False))
+                            else:
+                                print("Warning: closeness peak set is empty; skipping closeness PDB write.")
+
+                            # --- BETWEENNESS ---
+                            betw_peak_keys = set()
+                            betw_src = _find_first_existing(work_dir, [
+                                "betweenness_peaks", "betweenness_peaks.txt",
+                                "betw_peaks", "betw_peaks.txt",
+                                "betweenness_chain_labels.txt"
+                            ])
+                            if betw_src:
+                                rows = _parse_chain_resnum_value_lines(betw_src)
+                                if rows:
+                                    rows.sort(key=lambda x: x[0], reverse=True)
+                                    pairs = [(ch, n) for (val, ch, n) in rows[:30]]
                                     betw_peak_keys = _pairs_to_peak_keys_auto(pairs, residues_in_order)
                                     print(f"[betweenness] parsed {len(pairs)} peaks from {os.path.basename(betw_src)} -> mapped {len(betw_peak_keys)} residues")
                                 else:
-                                    ints_list = _read_pure_ints(betw_src)
-                                    betw_peak_keys = _ints_to_peak_keys_auto(ints_list, residues_in_order)
-                                    print(f"[betweenness] parsed {len(ints_list)} ints from {os.path.basename(betw_src)} -> mapped {len(betw_peak_keys)} residues")
-                        else:
-                            print("Warning: no betweenness peaks file found.")
+                                    pairs = _parse_reschain_pairs(betw_src)
+                                    if pairs:
+                                        betw_peak_keys = _pairs_to_peak_keys_auto(pairs, residues_in_order)
+                                        print(f"[betweenness] parsed {len(pairs)} peaks from {os.path.basename(betw_src)} -> mapped {len(betw_peak_keys)} residues")
+                                    else:
+                                        ints_list = _read_pure_ints(betw_src)
+                                        betw_peak_keys = _ints_to_peak_keys_auto(ints_list, residues_in_order)
+                                        print(f"[betweenness] parsed {len(ints_list)} ints from {os.path.basename(betw_src)} -> mapped {len(betw_peak_keys)} residues")
+                            else:
+                                print("Warning: no betweenness peaks file found.")
 
-                        betw_pdb_out = os.path.join(work_dir, f"{base}_BETWEENNESS_peaks_bfac.pdb")
-                        if betw_peak_keys:
-                            _write_bfactor_peak_pdb(save_path, betw_pdb_out, betw_peak_keys, peak_b=100.0, other_b=0.0)
-                            print(f"[PDB] Wrote betweenness peaks B-factor PDB: {betw_pdb_out}")
-                            viewers.append((betw_pdb_out, "Betweenness peaks (B=100 → RED spheres)", 0.9, False))
-                        else:
-                            print("Warning: betweenness peak set is empty; skipping betweenness PDB write.")
+                            betw_pdb_out = os.path.join(work_dir, f"{base}_BETWEENNESS_peaks_bfac.pdb")
+                            if betw_peak_keys:
+                                _write_bfactor_peak_pdb(save_path, betw_pdb_out, betw_peak_keys, peak_b=100.0, other_b=0.0)
+                                print(f"[PDB] Wrote betweenness peaks B-factor PDB: {betw_pdb_out}")
+                                viewers.append((betw_pdb_out, "Betweenness peaks (B=100 → RED spheres)", 0.9, False))
+                            else:
+                                print("Warning: betweenness peak set is empty; skipping betweenness PDB write.")
 
-                        # ---- PyMOL script if both exist (NO download link) ----
-                        if close_peak_keys and betw_peak_keys:
-                            pml_path = os.path.join(work_dir, f"{base}_peaks_bfac_views.pml")
-                            _write_pymol_pml(pml_path, close_pdb_out, betw_pdb_out)
-                            print(f"[PyMOL] Wrote script: {pml_path}")
+                            # PyMOL script (no download link)
+                            if close_peak_keys and betw_peak_keys:
+                                pml_path = os.path.join(work_dir, f"{base}_peaks_bfac_views.pml")
+                                _write_pymol_pml(pml_path, close_pdb_out, betw_pdb_out)
+                                print(f"[PyMOL] Wrote script: {pml_path}")
 
-                    except Exception as e_bfac:
-                        print(f"Warning: B-factor peak PDB generation failed: {e_bfac}")
+                        except Exception as e_bfac:
+                            print(f"Warning: B-factor peak PDB generation failed: {e_bfac}")
 
-                    # -------- Step 5: remote submission (if configured) --------
-                    # IMPORTANT: do NOT return early, or you'll skip rendering viewers.
-                    if not target_url:
-                        _progress(5, total_steps, "Local processing completed (no remote submission configured).")
-                    else:
-                        try:
-                            r = requests.post(target_url, data=data, files=files, timeout=180)
-                            _progress(5, total_steps, f"Remote submission completed (HTTP {r.status_code}).")
-                        except Exception as e_sub:
-                            print(f"Warning: remote submission failed: {e_sub}")
+                        _progress(4, total_steps, "Path generation and centrality analysis completed.")
 
-                except Exception as e:
-                    print("Error:", e)
+                    except Exception as e_inf:
+                        print(f"Warning: infinite/closeness pipeline failed: {e_inf}")
 
-        except Exception as e_outer:
-            with _LOG_OUT:
-                print("Error:", e_outer)
+                elif mode == "functional":
+                    print("Warning: Skipping path/centrality analysis (missing .cor or earlier failure).")
 
-        # ---- Render 3D views OUTSIDE the ipywidgets.Output capture ----
+                # -------- Step 5: remote submission (if configured) --------
+                data = {"prediction_mode": mode, FN["chain_id"]: chain_global}
+                if pdb_code.value.strip():
+                    data[FN["pdb_code"]] = pdb_code.value.strip().upper()
+                if email.value.strip():
+                    data[FN["email"]] = email.value.strip()
+
+                if mode == "functional":
+                    data[FN["path_length"]] = str(get_big_len())
+                elif mode == "paths_init_len":
+                    data.update({
+                        "length_paths": int(get_short_len()),
+                        "number_paths": int(get_num_paths_2()),
+                        "index_initial": int(init_idx.value),
+                        "chain_initial": (init_chain.value or "").strip()
+                    })
+                else:
+                    data.update({
+                        "index_initial": int(init_idx.value),
+                        "chain_initial": (init_chain.value or "").strip(),
+                        "index_final": int(final_idx.value),
+                        "chain_final": (final_chain.value or "").strip(),
+                        "number_paths": int(get_num_paths_3())
+                    })
+
+                files = {FN["pdb_file"]: (pdb_name, pdb_bytes, "chemical/x-pdb")}
+
+                if not target_url:
+                    _progress(5, total_steps, "Local processing completed (no remote submission configured).")
+                else:
+                    try:
+                        r = requests.post(target_url, data=data, files=files, timeout=180)
+                        _progress(5, total_steps, f"Remote submission completed (HTTP {r.status_code}).")
+                    except Exception as e_sub:
+                        print(f"Warning: remote submission failed: {e_sub}")
+
+            except Exception as e:
+                print("Error:", e)
+
+        # ---- Render py3Dmol OUTSIDE the Output widget capture ----
         if viewers:
             display(HTML("<hr><h4>3D Views</h4>"))
             for (pdb_path, title, radius, sticks) in viewers:
                 _view_bfactor_pdb_py3dmol(pdb_path, title, sphere_radius=radius, show_sticks=sticks)
-
 
     btn_new_job.on_click(on_new_job)
     btn_submit.on_click(on_submit)
