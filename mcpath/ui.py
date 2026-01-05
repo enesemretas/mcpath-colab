@@ -59,7 +59,7 @@ def _progress(step: int, total: int, message: str):
     """
     print(f"[{step}/{total}] {message}")
 
-# -------------------- py3Dmol peak-residue visualization helpers --------------------
+# -------------------- Peak -> B-factor PDB + viewer helpers --------------------
 _NUM_RE = re.compile(r"[-+]?(?:\d*\.\d+|\d+)(?:[eE][-+]?\d+)?")
 
 def _ensure_py3dmol():
@@ -79,14 +79,14 @@ def _ensure_py3dmol():
 def _parse_chain_tokens(chain_str: str):
     chain_str = (chain_str or "").strip()
     if not chain_str:
-        return None  # None => all chains
+        return None  # all chains
     toks = [t.strip() for t in re.split(r"[,\s]+", chain_str) if t.strip()]
     return set(toks) if toks else None
 
-def _parse_ca_residues_in_order(pdb_path: str, chain_str: str = ""):
+def _ca_residues_in_order_keys(pdb_path: str, chain_str: str = ""):
     """
     CA residues in PDB order:
-      [{"chain":"A","resi_raw":"123A","resi_num":123,"resn":"GLY"}, ...]
+      [{"chain":"A","resi_raw":"123A","resi_num":123}, ...]
     """
     want = _parse_chain_tokens(chain_str)
     residues = []
@@ -103,7 +103,6 @@ def _parse_ca_residues_in_order(pdb_path: str, chain_str: str = ""):
             if want is not None and ch not in want:
                 continue
 
-            resn = line[17:20].strip()
             resi = line[22:26].strip()
             icode = line[26].strip()
             resi_raw = f"{resi}{icode}" if icode else resi
@@ -115,95 +114,205 @@ def _parse_ca_residues_in_order(pdb_path: str, chain_str: str = ""):
 
             m = re.match(r"\d+", resi_raw)
             resi_num = int(m.group(0)) if m else None
-            residues.append({"chain": ch, "resi_raw": resi_raw, "resi_num": resi_num, "resn": resn})
 
+            residues.append({"chain": ch, "resi_raw": resi_raw, "resi_num": resi_num})
     return residues
 
-def _read_peak_indices(file_path: str):
-    """Reads a file that contains indices (1-based) or residue numbers; returns all ints found."""
-    idxs = []
-    with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
-        for line in f:
-            nums = _NUM_RE.findall(line)
-            for x in nums:
-                try:
-                    idxs.append(int(float(x)))
-                except Exception:
-                    pass
-    return idxs
-
-def _chain_to_resi_from_indices(indices_1based, residues_in_order):
-    """Map 1-based indices -> {chain:[resi,resi,...]} using CA order."""
-    out = {}
-    for idx in indices_1based:
-        if 1 <= idx <= len(residues_in_order):
-            r = residues_in_order[idx - 1]
-            if r["resi_num"] is None:
-                continue
-            out.setdefault(r["chain"], set()).add(int(r["resi_num"]))
-    return {ch: sorted(list(s)) for ch, s in out.items()}
-
-def _top_from_closeness_chain_labels(path: str, top_n: int = 30):
-    """
-    Try to parse 'closeness_chain_labels.txt' style file that often contains:
-      index  chain  resi  resn  value
-    We take the LAST float as value and pick top_n.
-    Returns {chain:[resi,...]}.
-    """
-    rows = []
+def _read_all_ints(path: str):
+    ints = []
     with open(path, "r", encoding="utf-8", errors="ignore") as f:
         for line in f:
-            line = line.strip()
-            if not line or line.startswith("#"):
+            for n in _NUM_RE.findall(line):
+                try:
+                    ints.append(int(float(n)))
+                except Exception:
+                    pass
+    return ints
+
+def _parse_closeness_chain_labels_top_resnums(labels_path: str, top_n: int = 30):
+    """
+    From closeness_chain_labels.txt choose top_n residues by (last float) value.
+    Returns: list of (chain, resi_num)
+    """
+    rows = []
+    with open(labels_path, "r", encoding="utf-8", errors="ignore") as f:
+        for line in f:
+            s = line.strip()
+            if not s or s.startswith("#"):
                 continue
-            nums = _NUM_RE.findall(line)
+
+            toks = re.split(r"\s+", s.replace(":", " "))
+            # find chain token (single alnum char)
+            chain = None
+            chain_pos = None
+            for i, t in enumerate(toks):
+                if len(t) == 1 and t.isalnum():
+                    chain = t
+                    chain_pos = i
+                    break
+            if chain is None:
+                continue
+
+            # numeric tokens
+            nums = _NUM_RE.findall(s)
             if not nums:
                 continue
 
-            # heuristic: find a single-char chain token in the line
-            toks = re.split(r"\s+", line.replace(":", " "))
-            chain_tok = None
-            for t in toks:
-                if len(t) == 1 and t.isalnum():
-                    chain_tok = t
-                    break
-
-            # try to get residue number: if 2+ ints on line, often second int is resi
-            int_nums = []
-            for n in nums:
-                try:
-                    int_nums.append(int(float(n)))
-                except Exception:
-                    pass
-
-            if chain_tok and int_nums:
-                # pick last int as residue number (more robust across formats)
-                resi_num = int_nums[-1]
-                try:
-                    val = float(nums[-1])
-                except Exception:
-                    val = None
-                if val is not None:
-                    rows.append((val, chain_tok, resi_num))
+            # value = last float
+            try:
+                val = float(nums[-1])
+            except Exception:
                 continue
 
-            # If no chain token, skip (we’ll fallback elsewhere)
-    if not rows:
-        return {}
+            # try to pick residue number = first int token AFTER the chain token, else last int in line
+            resi_num = None
+            for t in toks[(chain_pos + 1):]:
+                if re.fullmatch(r"\d+", t):
+                    resi_num = int(t)
+                    break
+            if resi_num is None:
+                # fallback: last integer-like among nums
+                int_nums = []
+                for n in nums:
+                    try:
+                        int_nums.append(int(float(n)))
+                    except Exception:
+                        pass
+                if int_nums:
+                    # often [index, resi] -> pick second if exists
+                    resi_num = int_nums[1] if len(int_nums) >= 2 else int_nums[-1]
 
-    rows.sort(key=lambda t: t[0], reverse=True)
+            if resi_num is None:
+                continue
+
+            rows.append((val, chain, int(resi_num)))
+
+    rows.sort(key=lambda x: x[0], reverse=True)
     rows = rows[:max(1, int(top_n))]
+    return [(ch, rn) for _, ch, rn in rows]
 
+def _peaks_to_keys_from_indices_or_resnums(peaks_ints, residues_in_order):
+    """
+    peaks_ints could be:
+      - 1-based indices into residues_in_order
+      - or residue numbers
+    Returns set of keys: {(chain, resi_raw), ...}
+    """
+    keys = set()
+    if not peaks_ints:
+        return keys
+
+    N = len(residues_in_order)
+    if N <= 0:
+        return keys
+
+    # Heuristic: if most values are <= N, treat as indices
+    leN = sum(1 for x in peaks_ints if 1 <= x <= N)
+    if leN >= max(1, int(0.7 * len(peaks_ints))):
+        # indices
+        for idx in peaks_ints:
+            if 1 <= idx <= N:
+                r = residues_in_order[idx - 1]
+                keys.add((r["chain"], r["resi_raw"]))
+        return keys
+
+    # else treat as residue numbers: highlight all residues that match those resi_num (across chains)
+    want_nums = set(int(x) for x in peaks_ints)
+    for r in residues_in_order:
+        if r["resi_num"] in want_nums:
+            keys.add((r["chain"], r["resi_raw"]))
+    return keys
+
+def _keys_from_chain_resnums(chain_resnums, residues_in_order):
+    """
+    chain_resnums: list[(chain, resi_num)]
+    Returns keys matching those (chain, resi_num) in the PDB (handles insertion codes by matching resi_num).
+    """
+    want = {}
+    for ch, rn in chain_resnums:
+        want.setdefault(ch, set()).add(int(rn))
+
+    keys = set()
+    for r in residues_in_order:
+        if r["chain"] in want and r["resi_num"] in want[r["chain"]]:
+            keys.add((r["chain"], r["resi_raw"]))
+    return keys
+
+def _write_bfactor_peak_pdb(pdb_in: str, pdb_out: str, peak_keys: set,
+                            peak_b: float = 100.0, other_b: float = 0.0):
+    """
+    Writes a PDB where B-factor is set to peak_b for residues in peak_keys, else other_b.
+    peak_keys contains (chain, resi_raw) pairs.
+    """
+    os.makedirs(os.path.dirname(pdb_out) or ".", exist_ok=True)
+
+    with open(pdb_in, "r", encoding="utf-8", errors="ignore") as fin, \
+         open(pdb_out, "w", encoding="utf-8") as fout:
+        for line in fin:
+            if line.startswith(("ATOM", "HETATM")):
+                ch = line[21].strip()
+                resi = line[22:26].strip()
+                icode = line[26].strip()
+                resi_raw = f"{resi}{icode}" if icode else resi
+
+                b = peak_b if (ch, resi_raw) in peak_keys else other_b
+                b_str = f"{b:6.2f}"
+
+                # ensure line is long enough
+                if len(line) < 66:
+                    line = line.rstrip("\n").ljust(66) + "\n"
+
+                # B-factor columns 61-66 => [60:66]
+                line = line[:60] + b_str + line[66:]
+            fout.write(line)
+
+    return pdb_out
+
+def _extract_peak_resis_from_bfactor_pdb(pdb_path: str, b_threshold: float = 50.0):
+    """
+    Reads CA atoms and collects residues whose B >= threshold.
+    Returns dict: {chain: [resi_num, ...]}
+    """
     out = {}
-    for _, ch, rn in rows:
-        out.setdefault(ch, set()).add(int(rn))
+    seen = set()
+    with open(pdb_path, "r", encoding="utf-8", errors="ignore") as f:
+        for line in f:
+            if not line.startswith("ATOM"):
+                continue
+            if line[12:16].strip() != "CA":
+                continue
+            if len(line) < 66:
+                continue
+
+            ch = line[21].strip()
+            resi = line[22:26].strip()
+            icode = line[26].strip()
+            resi_raw = f"{resi}{icode}" if icode else resi
+
+            try:
+                b = float(line[60:66])
+            except Exception:
+                continue
+            if b < b_threshold:
+                continue
+
+            m = re.match(r"\d+", resi_raw)
+            if not m:
+                continue
+            rn = int(m.group(0))
+
+            key = (ch, resi_raw)
+            if key in seen:
+                continue
+            seen.add(key)
+
+            out.setdefault(ch, set()).add(rn)
+
     return {ch: sorted(list(s)) for ch, s in out.items()}
 
-def _show_py3dmol_red_highlight(pdb_path: str, title: str, chain_to_resi: dict, out_html_path: str):
+def _view_bfactor_pdb_py3dmol(pdb_path: str, title: str):
     """
-    Creates a py3Dmol viewer and:
-      - tries to display inline
-      - always saves HTML and prints a clickable link (works even if inline is blank)
+    Viewer that highlights residues RED based on B-factor >= 50 in the given PDB.
     """
     if not _ensure_py3dmol():
         return
@@ -212,14 +321,14 @@ def _show_py3dmol_red_highlight(pdb_path: str, title: str, chain_to_resi: dict, 
     from IPython.display import display, HTML, FileLink
 
     pdb_text = open(pdb_path, "r", encoding="utf-8", errors="ignore").read()
-    view = py3Dmol.view(width=800, height=520)
-    view.addModel(pdb_text, "pdb")
+    peaks = _extract_peak_resis_from_bfactor_pdb(pdb_path, b_threshold=50.0)
 
-    # Base protein
+    view = py3Dmol.view(width=850, height=520)
+    view.addModel(pdb_text, "pdb")
     view.setStyle({}, {"cartoon": {"color": "lightgray"}})
 
-    # Highlight peaks in RED
-    for ch, resis in (chain_to_resi or {}).items():
+    # Highlight based on B-factor-coded peaks
+    for ch, resis in peaks.items():
         if not resis:
             continue
         view.addStyle({"chain": ch, "resi": resis}, {"stick": {"color": "red"}})
@@ -227,22 +336,59 @@ def _show_py3dmol_red_highlight(pdb_path: str, title: str, chain_to_resi: dict, 
 
     view.zoomTo()
 
-    # Save HTML (reliable)
-    html = view._make_html()
-    os.makedirs(os.path.dirname(out_html_path) or ".", exist_ok=True)
-    with open(out_html_path, "w", encoding="utf-8") as f:
-        f.write(html)
+    # Save HTML always (reliable inside widget Output)
+    html_path = os.path.splitext(pdb_path)[0] + ".html"
+    with open(html_path, "w", encoding="utf-8") as f:
+        f.write(view._make_html())
 
-    # Try inline (may appear blank inside ipywidgets Output), but still attempt:
     display(HTML(f"<b>{title}</b>"))
-    try:
-        display(HTML(html))
-    except Exception:
-        pass
+    display(FileLink(html_path))
+    view.show()
 
-    # Always give a clickable HTML file link:
-    display(HTML("Open viewer (reliable): "))
-    display(FileLink(out_html_path))
+def _write_pymol_pml(pml_path: str, pdb_close: str, pdb_betw: str):
+    """
+    PyMOL script to color peaks red using B-factors (b > 50) for each object.
+    """
+    pml = f"""
+reinitialize
+bg_color white
+set ray_opaque_background, off
+
+load {pdb_close}, closeness
+load {pdb_betw}, betweenness
+
+disable betweenness
+hide everything, all
+
+# --- closeness view ---
+enable closeness
+show cartoon, closeness
+color gray80, closeness
+select c_peaks, closeness and b > 50
+color red, c_peaks
+show sticks, c_peaks
+show spheres, c_peaks and name CA
+set sphere_scale, 0.6, c_peaks
+orient closeness
+scene closeness, store
+
+# --- betweenness view ---
+disable closeness
+enable betweenness
+show cartoon, betweenness
+color gray80, betweenness
+select b_peaks, betweenness and b > 50
+color red, b_peaks
+show sticks, b_peaks
+show spheres, b_peaks and name CA
+set sphere_scale, 0.6, b_peaks
+orient betweenness
+scene betweenness, store
+
+# Tip: Scene menu -> recall closeness / betweenness
+"""
+    os.makedir
+
 
 
 
