@@ -59,6 +59,180 @@ def _progress(step: int, total: int, message: str):
     """
     print(f"[{step}/{total}] {message}")
 
+# -------------------- py3Dmol helpers (top residues in red) --------------------
+_NUM_RE = re.compile(r"[-+]?(?:\d*\.\d+|\d+)(?:[eE][-+]?\d+)?")
+
+def _parse_chain_tokens(chain_str: str):
+    chain_str = (chain_str or "").strip()
+    if not chain_str:
+        return None  # None => all chains
+    toks = [t.strip() for t in re.split(r"[,\s]+", chain_str) if t.strip()]
+    return set(toks) if toks else None
+
+def _parse_ca_residues_in_order(pdb_path: str, chain_str: str = ""):
+    """
+    CA residues in PDB order:
+      [{"chain":"A","resi_raw":"123A","resi_num":123,"resn":"GLY"}, ...]
+    Note: insertion codes are ignored for resi_num (123A -> 123).
+    """
+    want = _parse_chain_tokens(chain_str)
+    residues = []
+    seen = set()
+
+    with open(pdb_path, "r", encoding="utf-8", errors="ignore") as f:
+        for line in f:
+            if not line.startswith("ATOM"):
+                continue
+            if line[12:16].strip() != "CA":
+                continue
+
+            ch = line[21].strip()
+            if want is not None and ch not in want:
+                continue
+
+            resn = line[17:20].strip()
+            resi = line[22:26].strip()
+            icode = line[26].strip()
+            resi_raw = f"{resi}{icode}" if icode else resi
+
+            key = (ch, resi_raw)
+            if key in seen:
+                continue
+            seen.add(key)
+
+            m = re.match(r"\d+", resi_raw)
+            resi_num = int(m.group(0)) if m else None
+
+            residues.append({"chain": ch, "resi_raw": resi_raw, "resi_num": resi_num, "resn": resn})
+
+    return residues
+
+def _read_metric_file(metric_path: str):
+    """
+    Robust metric reader:
+      - supports: "value"
+      - supports: "idx value" or "idx ... value" (takes last number as value)
+    Returns list aligned by index order if indices exist, else file order.
+    """
+    idx_to_val = {}
+    seq_vals = []
+
+    with open(metric_path, "r", encoding="utf-8", errors="ignore") as f:
+        for line in f:
+            nums = _NUM_RE.findall(line)
+            if not nums:
+                continue
+
+            if len(nums) >= 2:
+                try:
+                    idx = int(float(nums[0]))
+                    val = float(nums[-1])
+                    if idx >= 1:
+                        idx_to_val[idx] = val
+                        continue
+                except Exception:
+                    pass
+
+            try:
+                seq_vals.append(float(nums[-1]))
+            except Exception:
+                continue
+
+    if idx_to_val:
+        N = max(idx_to_val.keys())
+        return [idx_to_val.get(i, float("nan")) for i in range(1, N + 1)]
+
+    return seq_vals
+
+def _find_latest_metric_file(work_dir: str, kind: str):
+    """
+    Attempts to autodetect the newest closeness/betweenness output file in work_dir.
+    """
+    kind = kind.lower()
+    if kind == "closeness":
+        keys = ["closeness", "close"]
+    elif kind == "betweenness":
+        keys = ["betweenness", "betw"]
+    else:
+        raise ValueError("kind must be 'closeness' or 'betweenness'")
+
+    exts = (".txt", ".dat", ".out", ".csv", ".tsv")
+    cands = []
+    for k in keys:
+        cands += glob.glob(os.path.join(work_dir, f"*{k}*"))
+        cands += glob.glob(os.path.join(work_dir, f"*{k}*.*"))
+
+    cands = [
+        p for p in cands
+        if os.path.isfile(p)
+        and (p.lower().endswith(exts) or os.path.splitext(p)[1] == "")
+        and not p.lower().endswith((".py", ".pml", ".pse", ".png", ".jpg", ".jpeg"))
+    ]
+
+    if not cands:
+        return None
+    cands.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+    return cands[0]
+
+def _top_residues_from_metric(pdb_path: str, metric_path: str, chain_str: str, top_n: int = 30):
+    residues = _parse_ca_residues_in_order(pdb_path, chain_str)
+    vals = _read_metric_file(metric_path)
+
+    n = min(len(residues), len(vals))
+    rows = []
+    for i in range(n):
+        v = vals[i]
+        if v != v:  # NaN
+            continue
+        rows.append((i + 1, float(v), residues[i]))  # 1-based index
+
+    rows.sort(key=lambda t: t[1], reverse=True)
+    return rows[: max(1, int(top_n))]
+
+def _group_resi_by_chain(top_rows):
+    """
+    top_rows: [(idx, value, residue_dict), ...]
+    -> {"A":[10,22,35], "B":[5,9]}
+    """
+    out = {}
+    for _, _, r in top_rows:
+        ch = r["chain"]
+        rn = r["resi_num"]
+        if rn is None:
+            continue
+        out.setdefault(ch, set()).add(int(rn))
+    return {ch: sorted(list(s)) for ch, s in out.items()}
+
+def _show_py3dmol_highlight(pdb_path: str, title: str, chain_to_resi: dict, width=600, height=420):
+    try:
+        import py3Dmol
+        from IPython.display import display as _display
+    except Exception as e:
+        print(f"Warning: py3Dmol not available: {e}")
+        return
+
+    pdb_text = open(pdb_path, "r", encoding="utf-8", errors="ignore").read()
+
+    view = py3Dmol.view(width=width, height=height)
+    view.addModel(pdb_text, "pdb")
+
+    # Base: grey cartoon
+    view.setStyle({}, {"cartoon": {"color": "lightgray"}})
+
+    # Highlight: red sticks + red spheres on CA
+    for ch, resis in chain_to_resi.items():
+        if not resis:
+            continue
+        view.addStyle({"chain": ch, "resi": resis}, {"stick": {"color": "red"}})
+        view.addStyle({"chain": ch, "resi": resis, "atom": "CA"}, {"sphere": {"color": "red", "radius": 0.7}})
+
+    view.zoomTo()
+    _display(W.HTML(f"<b>{title}</b>"))
+    view.show()
+
+
+
+
 # --- Single row: "<Label> : [List | Custom]  <value-widget>"
 def _list_or_custom_row(label: str, options, default_value, minv, maxv, step=1):
     options = sorted({int(x) for x in options})
