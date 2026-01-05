@@ -606,6 +606,53 @@ def launch(
                             os.chdir(work_dir)
                             close_mod.main()
                             betw_mod.main()
+                           
+                            # ---- Step 4b: py3Dmol visualization (top residues in RED) ----
+                            try:
+                                top_n_vis = 30  # change if you want (e.g., 20 / 50)
+
+                                close_out = _find_latest_metric_file(work_dir, "closeness")
+                                betw_out  = _find_latest_metric_file(work_dir, "betweenness")
+
+                                if not close_out:
+                                    print("Warning: Could not find closeness output file for visualization.")
+                                if not betw_out:
+                                    print("Warning: Could not find betweenness output file for visualization.")
+
+                                if close_out:
+                                    close_top = _top_residues_from_metric(
+                                        pdb_path=save_path,
+                                        metric_path=close_out,
+                                        chain_str=chain_global,   # "" means all chains
+                                        top_n=top_n_vis
+                                    )
+                                    close_sel = _group_resi_by_chain(close_top)
+                                    _show_py3dmol_highlight(
+                                        pdb_path=save_path,
+                                        title=f"Closeness: Top {top_n_vis} residues (RED)",
+                                        chain_to_resi=close_sel
+                                    )
+                                    print(f"[py3Dmol] Closeness file: {os.path.basename(close_out)}")
+
+                                if betw_out:
+                                    betw_top = _top_residues_from_metric(
+                                        pdb_path=save_path,
+                                        metric_path=betw_out,
+                                        chain_str=chain_global,
+                                        top_n=top_n_vis
+                                    )
+                                    betw_sel = _group_resi_by_chain(betw_top)
+                                    _show_py3dmol_highlight(
+                                        pdb_path=save_path,
+                                        title=f"Betweenness: Top {top_n_vis} residues (RED)",
+                                        chain_to_resi=betw_sel
+                                    )
+                                    print(f"[py3Dmol] Betweenness file: {os.path.basename(betw_out)}")
+
+                            except Exception as e_vis:
+                                print(f"Warning: py3Dmol visualization failed: {e_vis}")
+
+                        
                         finally:
                             os.chdir(old_cwd2)
 
