@@ -59,7 +59,7 @@ def _progress(step: int, total: int, message: str):
     """
     print(f"[{step}/{total}] {message}")
 
-# -------------------- py3Dmol helpers (top residues in red) --------------------
+# -------------------- py3Dmol peak-residue visualization helpers --------------------
 _NUM_RE = re.compile(r"[-+]?(?:\d*\.\d+|\d+)(?:[eE][-+]?\d+)?")
 
 def _ensure_py3dmol():
@@ -76,7 +76,6 @@ def _ensure_py3dmol():
             print(f"Warning: py3Dmol not available and install failed: {e}")
             return False
 
-
 def _parse_chain_tokens(chain_str: str):
     chain_str = (chain_str or "").strip()
     if not chain_str:
@@ -88,7 +87,6 @@ def _parse_ca_residues_in_order(pdb_path: str, chain_str: str = ""):
     """
     CA residues in PDB order:
       [{"chain":"A","resi_raw":"123A","resi_num":123,"resn":"GLY"}, ...]
-    Note: insertion codes are ignored for resi_num (123A -> 123).
     """
     want = _parse_chain_tokens(chain_str)
     residues = []
@@ -117,147 +115,134 @@ def _parse_ca_residues_in_order(pdb_path: str, chain_str: str = ""):
 
             m = re.match(r"\d+", resi_raw)
             resi_num = int(m.group(0)) if m else None
-
             residues.append({"chain": ch, "resi_raw": resi_raw, "resi_num": resi_num, "resn": resn})
 
     return residues
 
-def _read_metric_file(metric_path: str):
-    """
-    Robust metric reader:
-      - supports: "value"
-      - supports: "idx value" or "idx ... value" (takes last number as value)
-    Returns list aligned by index order if indices exist, else file order.
-    """
-    idx_to_val = {}
-    seq_vals = []
-
-    with open(metric_path, "r", encoding="utf-8", errors="ignore") as f:
+def _read_peak_indices(file_path: str):
+    """Reads a file that contains indices (1-based) or residue numbers; returns all ints found."""
+    idxs = []
+    with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
         for line in f:
+            nums = _NUM_RE.findall(line)
+            for x in nums:
+                try:
+                    idxs.append(int(float(x)))
+                except Exception:
+                    pass
+    return idxs
+
+def _chain_to_resi_from_indices(indices_1based, residues_in_order):
+    """Map 1-based indices -> {chain:[resi,resi,...]} using CA order."""
+    out = {}
+    for idx in indices_1based:
+        if 1 <= idx <= len(residues_in_order):
+            r = residues_in_order[idx - 1]
+            if r["resi_num"] is None:
+                continue
+            out.setdefault(r["chain"], set()).add(int(r["resi_num"]))
+    return {ch: sorted(list(s)) for ch, s in out.items()}
+
+def _top_from_closeness_chain_labels(path: str, top_n: int = 30):
+    """
+    Try to parse 'closeness_chain_labels.txt' style file that often contains:
+      index  chain  resi  resn  value
+    We take the LAST float as value and pick top_n.
+    Returns {chain:[resi,...]}.
+    """
+    rows = []
+    with open(path, "r", encoding="utf-8", errors="ignore") as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
             nums = _NUM_RE.findall(line)
             if not nums:
                 continue
 
-            if len(nums) >= 2:
+            # heuristic: find a single-char chain token in the line
+            toks = re.split(r"\s+", line.replace(":", " "))
+            chain_tok = None
+            for t in toks:
+                if len(t) == 1 and t.isalnum():
+                    chain_tok = t
+                    break
+
+            # try to get residue number: if 2+ ints on line, often second int is resi
+            int_nums = []
+            for n in nums:
                 try:
-                    idx = int(float(nums[0]))
-                    val = float(nums[-1])
-                    if idx >= 1:
-                        idx_to_val[idx] = val
-                        continue
+                    int_nums.append(int(float(n)))
                 except Exception:
                     pass
 
-            try:
-                seq_vals.append(float(nums[-1]))
-            except Exception:
+            if chain_tok and int_nums:
+                # pick last int as residue number (more robust across formats)
+                resi_num = int_nums[-1]
+                try:
+                    val = float(nums[-1])
+                except Exception:
+                    val = None
+                if val is not None:
+                    rows.append((val, chain_tok, resi_num))
                 continue
 
-    if idx_to_val:
-        N = max(idx_to_val.keys())
-        return [idx_to_val.get(i, float("nan")) for i in range(1, N + 1)]
+            # If no chain token, skip (we’ll fallback elsewhere)
+    if not rows:
+        return {}
 
-    return seq_vals
+    rows.sort(key=lambda t: t[0], reverse=True)
+    rows = rows[:max(1, int(top_n))]
 
-def _find_best_metric_file(work_dir: str, kind: str, min_numeric: int = 20):
-    """
-    Finds the most likely metric file by picking the candidate that yields
-    the largest number of numeric values when parsed.
-    This avoids selecting label/peaks files.
-    """
-    kind = kind.lower()
-    if kind == "closeness":
-        keys = ["closeness", "close"]
-    elif kind == "betweenness":
-        keys = ["betweenness", "betw"]
-    else:
-        raise ValueError("kind must be 'closeness' or 'betweenness'")
-
-    exts = (".txt", ".dat", ".out", ".csv", ".tsv")
-    cands = []
-    for k in keys:
-        cands += glob.glob(os.path.join(work_dir, f"*{k}*"))
-        cands += glob.glob(os.path.join(work_dir, f"*{k}*.*"))
-
-    cands = [
-        p for p in cands
-        if os.path.isfile(p)
-        and (p.lower().endswith(exts) or os.path.splitext(p)[1] == "")
-        and not p.lower().endswith((".py", ".pml", ".pse", ".png", ".jpg", ".jpeg"))
-    ]
-    if not cands:
-        return None
-
-    best = None
-    best_n = -1
-    for p in sorted(cands, key=lambda x: os.path.getmtime(x), reverse=True):
-        try:
-            vals = _read_metric_file(p)
-            n = sum(1 for v in vals if (v == v))  # count non-NaN
-            if n > best_n:
-                best, best_n = p, n
-        except Exception:
-            continue
-
-    if best_n < min_numeric:
-        return None
-    return best
-
-
-def _top_residues_from_metric(pdb_path: str, metric_path: str, chain_str: str, top_n: int = 30):
-    residues = _parse_ca_residues_in_order(pdb_path, chain_str)
-    vals = _read_metric_file(metric_path)
-
-    n = min(len(residues), len(vals))
-    rows = []
-    for i in range(n):
-        v = vals[i]
-        if v != v:  # NaN
-            continue
-        rows.append((i + 1, float(v), residues[i]))  # 1-based index
-
-    rows.sort(key=lambda t: t[1], reverse=True)
-    return rows[: max(1, int(top_n))]
-
-def _group_resi_by_chain(top_rows):
-    """
-    top_rows: [(idx, value, residue_dict), ...]
-    -> {"A":[10,22,35], "B":[5,9]}
-    """
     out = {}
-    for _, _, r in top_rows:
-        ch = r["chain"]
-        rn = r["resi_num"]
-        if rn is None:
-            continue
+    for _, ch, rn in rows:
         out.setdefault(ch, set()).add(int(rn))
     return {ch: sorted(list(s)) for ch, s in out.items()}
 
-def _show_py3dmol_highlight(pdb_path: str, title: str, chain_to_resi: dict, width=600, height=420):
+def _show_py3dmol_red_highlight(pdb_path: str, title: str, chain_to_resi: dict, out_html_path: str):
+    """
+    Creates a py3Dmol viewer and:
+      - tries to display inline
+      - always saves HTML and prints a clickable link (works even if inline is blank)
+    """
     if not _ensure_py3dmol():
         return
 
     import py3Dmol
-    from IPython.display import display as _display
+    from IPython.display import display, HTML, FileLink
 
     pdb_text = open(pdb_path, "r", encoding="utf-8", errors="ignore").read()
-
-    view = py3Dmol.view(width=width, height=height)
+    view = py3Dmol.view(width=800, height=520)
     view.addModel(pdb_text, "pdb")
 
-    # Base: grey cartoon
+    # Base protein
     view.setStyle({}, {"cartoon": {"color": "lightgray"}})
 
-    # Highlight: red sticks + red spheres on CA
-    for ch, resis in chain_to_resi.items():
+    # Highlight peaks in RED
+    for ch, resis in (chain_to_resi or {}).items():
         if not resis:
             continue
         view.addStyle({"chain": ch, "resi": resis}, {"stick": {"color": "red"}})
-        view.addStyle({"chain": ch, "resi": resis, "atom": "CA"}, {"sphere": {"color": "red", "radius": 0.7}})
+        view.addStyle({"chain": ch, "resi": resis, "atom": "CA"}, {"sphere": {"color": "red", "radius": 0.75}})
 
     view.zoomTo()
-    _display(W.HTML(f"<b>{title}</b>"))
-    view.show()
+
+    # Save HTML (reliable)
+    html = view._make_html()
+    os.makedirs(os.path.dirname(out_html_path) or ".", exist_ok=True)
+    with open(out_html_path, "w", encoding="utf-8") as f:
+        f.write(html)
+
+    # Try inline (may appear blank inside ipywidgets Output), but still attempt:
+    display(HTML(f"<b>{title}</b>"))
+    try:
+        display(HTML(html))
+    except Exception:
+        pass
+
+    # Always give a clickable HTML file link:
+    display(HTML("Open viewer (reliable): "))
+    display(FileLink(out_html_path))
 
 
 
@@ -637,50 +622,71 @@ def launch(
                             close_mod.main()
                             betw_mod.main()
                            
-                            # ---- Step 4b: py3Dmol visualization (top residues in RED) ----
+                            # ---- Step 4b: py3Dmol = main PDB + RED peak residues (separate views) ----
                             try:
-                                top_n_vis = 30  # change if you want
+                                work_dir = os.path.dirname(save_path)
+                                base = os.path.splitext(os.path.basename(save_path))[0]
+                                residues_in_order = _parse_ca_residues_in_order(save_path, chain_global)
 
-                                close_out = _find_best_metric_file(work_dir, "closeness", min_numeric=20)
-                                betw_out  = _find_best_metric_file(work_dir, "betweenness", min_numeric=20)
+                                # ---- Closeness peaks ----
+                                # Prefer closeness_chain_labels if present (often contains label+values).
+                                close_labels = os.path.join(work_dir, "closeness_chain_labels.txt")
+                                close_sel = {}
+                                if os.path.isfile(close_labels):
+                                    close_sel = _top_from_closeness_chain_labels(close_labels, top_n=30)
 
-                                if not close_out:
-                                    print("Warning: Could not find a valid closeness metric file for visualization.")
-                                if not betw_out:
-                                    print("Warning: Could not find a valid betweenness metric file for visualization.")
+                                # Fallback: if closeness peaks file exists, map indices -> residues
+                                close_peaks = None
+                                for cand in ["closeness_peaks", "closeness_peaks.txt", "close_peaks", "close_peaks.txt"]:
+                                    p = os.path.join(work_dir, cand)
+                                    if os.path.isfile(p):
+                                        close_peaks = p
+                                        break
+                                if (not close_sel) and close_peaks:
+                                    idxs = _read_peak_indices(close_peaks)
+                                    close_sel = _chain_to_resi_from_indices(idxs, residues_in_order)
 
-                                if close_out:
-                                    close_top = _top_residues_from_metric(
+                                if close_sel:
+                                    close_html = os.path.join(work_dir, f"{base}_closeness_red_peaks.html")
+                                    _show_py3dmol_red_highlight(
                                         pdb_path=save_path,
-                                        metric_path=close_out,
-                                        chain_str=chain_global,
-                                        top_n=top_n_vis
+                                        title="Closeness: important residues (RED) on main PDB",
+                                        chain_to_resi=close_sel,
+                                        out_html_path=close_html
                                     )
-                                    close_sel = _group_resi_by_chain(close_top)
-                                    _show_py3dmol_highlight(
-                                        pdb_path=save_path,
-                                        title=f"Closeness: Top {top_n_vis} residues (RED)",
-                                        chain_to_resi=close_sel
-                                    )
-                                    print(f"[py3Dmol] Closeness metric: {os.path.basename(close_out)}")
+                                    n_close = sum(len(v) for v in close_sel.values())
+                                    print(f"[py3Dmol] Closeness highlighted residues: {n_close}")
+                                else:
+                                    print("Warning: No closeness peak residues could be determined (no parsable closeness output).")
 
-                                if betw_out:
-                                    betw_top = _top_residues_from_metric(
+                                # ---- Betweenness peaks ----
+                                # Your run produced 'betweenness_peaks' (no extension), so use it directly if present.
+                                betw_peaks = None
+                                for cand in ["betweenness_peaks", "betweenness_peaks.txt", "betw_peaks", "betw_peaks.txt"]:
+                                    p = os.path.join(work_dir, cand)
+                                    if os.path.isfile(p):
+                                        betw_peaks = p
+                                        break
+
+                                if betw_peaks:
+                                    idxs = _read_peak_indices(betw_peaks)
+                                    betw_sel = _chain_to_resi_from_indices(idxs, residues_in_order)
+
+                                    betw_html = os.path.join(work_dir, f"{base}_betweenness_red_peaks.html")
+                                    _show_py3dmol_red_highlight(
                                         pdb_path=save_path,
-                                        metric_path=betw_out,
-                                        chain_str=chain_global,
-                                        top_n=top_n_vis
+                                        title="Betweenness: peak residues (RED) on main PDB",
+                                        chain_to_resi=betw_sel,
+                                        out_html_path=betw_html
                                     )
-                                    betw_sel = _group_resi_by_chain(betw_top)
-                                    _show_py3dmol_highlight(
-                                        pdb_path=save_path,
-                                        title=f"Betweenness: Top {top_n_vis} residues (RED)",
-                                        chain_to_resi=betw_sel
-                                    )
-                                    print(f"[py3Dmol] Betweenness metric: {os.path.basename(betw_out)}")
+                                    n_betw = sum(len(v) for v in betw_sel.values())
+                                    print(f"[py3Dmol] Betweenness highlighted residues: {n_betw}")
+                                else:
+                                    print("Warning: betweenness_peaks file not found; cannot highlight betweenness peaks.")
 
                             except Exception as e_vis:
-                                print(f"Warning: py3Dmol visualization failed: {e_vis}")
+                                print(f"Warning: py3Dmol peak visualization failed: {e_vis}")
+
 
                         
                         finally:
