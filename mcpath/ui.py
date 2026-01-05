@@ -25,7 +25,7 @@ def _is_valid_chain_list(ch_str: str) -> bool:
     """
     ch_str = (ch_str or "").strip()
     if not ch_str:
-        return True  # empty -> all chains
+        return True
     tokens = [t.strip() for t in re.split(r"[,\s]+", ch_str) if t.strip()]
     if not tokens:
         return True
@@ -55,14 +55,9 @@ def _logo_widget(branding: dict):
         return None
 
 def _progress(step: int, total: int, message: str):
-    """
-    Minimal progress message helper.
-    Example: [1/5] Input validated and PDB saved.
-    """
     print(f"[{step}/{total}] {message}")
 
 def _show_download(path: str, label: str = "file"):
-    """Clickable download link in notebook output."""
     display(HTML(f"<b>Download {label}:</b>"))
     display(FileLink(path))
 
@@ -73,15 +68,12 @@ def _find_first_existing(work_dir: str, candidates):
             return p
     return None
 
-# -------------------- Peak -> B-factor PDB + py3Dmol viewer helpers --------------------
+# -------------------- Peak -> B-factor PDB + viewer helpers --------------------
 _NUM_RE = re.compile(r"[-+]?(?:\d*\.\d+|\d+)(?:[eE][-+]?\d+)?")
 # matches "16A", "1913Q", and also "16 A"
 _RESCHAIN_RE = re.compile(r"\b(\d+)\s*([A-Za-z0-9])\b")
 
 def _ensure_py3dmol():
-    """
-    py3Dmol is not always installed in Colab. We'll attempt installation once.
-    """
     try:
         import py3Dmol  # noqa: F401
         return True
@@ -97,11 +89,11 @@ def _ensure_py3dmol():
 def _parse_chain_tokens(chain_str: str):
     chain_str = (chain_str or "").strip()
     if not chain_str:
-        return None  # all chains
+        return None
     toks = [t.strip() for t in re.split(r"[,\s]+", chain_str) if t.strip()]
     return set(toks) if toks else None
 
-def _ca_residues_in_order_keys(pdb_path: str, chain_str: str = ""):
+def _ca_residues_in_order(pdb_path: str, chain_str: str = ""):
     """
     CA residues in PDB order:
       [{"chain":"A","resi_raw":"123A","resi_num":123}, ...]
@@ -109,14 +101,12 @@ def _ca_residues_in_order_keys(pdb_path: str, chain_str: str = ""):
     want = _parse_chain_tokens(chain_str)
     residues = []
     seen = set()
-
     with open(pdb_path, "r", encoding="utf-8", errors="ignore") as f:
         for line in f:
             if not line.startswith("ATOM"):
                 continue
             if line[12:16].strip() != "CA":
                 continue
-
             ch = line[21].strip()
             if want is not None and ch not in want:
                 continue
@@ -134,28 +124,21 @@ def _ca_residues_in_order_keys(pdb_path: str, chain_str: str = ""):
             resi_num = int(m.group(0)) if m else None
 
             residues.append({"chain": ch, "resi_raw": resi_raw, "resi_num": resi_num})
-
     return residues
 
-def _read_all_ints(path: str):
-    """
-    WARNING: This will also find floats and convert them to int (e.g., 0.046 -> 0).
-    Use ONLY as a fallback when the file is known to be integer-only.
-    """
-    ints = []
+def _read_pure_ints(path: str):
+    """Extract ONLY pure integers (avoids turning floats into 0)."""
+    out = []
     with open(path, "r", encoding="utf-8", errors="ignore") as f:
         for line in f:
-            for n in _NUM_RE.findall(line):
-                try:
-                    ints.append(int(float(n)))
-                except Exception:
-                    pass
-    return ints
+            for m in re.finditer(r"\b\d+\b", line):
+                out.append(int(m.group(0)))
+    return out
 
 def _parse_reschain_pairs(path: str):
     """
-    Extract (chain, resnum) pairs from lines like:
-      16A  -> closeness = ...
+    Extract (chain, number) pairs from lines like:
+      16A  -> ...
       1913Q -> ...
     """
     pairs = []
@@ -173,7 +156,7 @@ def _parse_chain_resnum_value_lines(path: str):
     """
     Parse lines containing e.g.:
       16A -> closeness = 0.184519
-    Returns list of (value, chain, resnum)
+    Returns list of (value, chain, number)
     """
     rows = []
     with open(path, "r", encoding="utf-8", errors="ignore") as f:
@@ -194,105 +177,93 @@ def _parse_chain_resnum_value_lines(path: str):
             rows.append((val, ch, rn))
     return rows
 
-def _parse_closeness_chain_labels_top_resnums_tokenwise(labels_path: str, top_n: int = 30):
+def _build_chain_maps(residues_in_order):
     """
-    Token-wise fallback for table-like closeness_chain_labels formats.
-    Attempts to extract a chain token and residue number and rank by last float.
-    Returns list[(chain, resnum)].
+    Build per-chain ordered lists and residue-number sets for auto-detection.
     """
-    rows = []
-    with open(labels_path, "r", encoding="utf-8", errors="ignore") as f:
-        for line in f:
-            s = line.strip()
-            if not s or s.startswith("#"):
-                continue
-
-            nums = _NUM_RE.findall(s)
-            if not nums:
-                continue
-            try:
-                val = float(nums[-1])
-            except Exception:
-                continue
-
-            toks = re.split(r"\s+", s.replace(":", " "))
-            # pick first single-char token as chain
-            chain = None
-            chain_pos = None
-            for i, t in enumerate(toks):
-                if len(t) == 1 and t.isalnum():
-                    chain = t
-                    chain_pos = i
-                    break
-            if chain is None:
-                continue
-
-            # residue number: first pure int token after chain, else last int-like
-            resi_num = None
-            for t in toks[(chain_pos + 1):]:
-                if re.fullmatch(r"\d+", t):
-                    resi_num = int(t)
-                    break
-            if resi_num is None:
-                int_nums = []
-                for n in nums:
-                    try:
-                        int_nums.append(int(float(n)))
-                    except Exception:
-                        pass
-                if int_nums:
-                    resi_num = int_nums[1] if len(int_nums) >= 2 else int_nums[-1]
-            if resi_num is None:
-                continue
-
-            rows.append((val, chain, int(resi_num)))
-
-    rows.sort(key=lambda x: x[0], reverse=True)
-    rows = rows[:max(1, int(top_n))]
-    return [(ch, rn) for (val, ch, rn) in rows]
-
-def _keys_from_chain_resnums(chain_resnums, residues_in_order):
-    """
-    chain_resnums: list[(chain, resi_num)]
-    Returns keys matching those (chain, resi_num) in the PDB.
-    Note: matches by numeric part of residue id (handles insertion codes).
-    """
-    want = {}
-    for ch, rn in chain_resnums:
-        want.setdefault(ch, set()).add(int(rn))
-
-    keys = set()
+    chain_to_ordered = {}
+    chain_to_resnums = {}
     for r in residues_in_order:
-        if r["resi_num"] is None:
-            continue
-        if r["chain"] in want and r["resi_num"] in want[r["chain"]]:
-            keys.add((r["chain"], r["resi_raw"]))
-    return keys
+        ch = r["chain"]
+        chain_to_ordered.setdefault(ch, []).append((r["resi_raw"], r["resi_num"]))
+        if r["resi_num"] is not None:
+            chain_to_resnums.setdefault(ch, set()).add(r["resi_num"])
+    return chain_to_ordered, chain_to_resnums
 
-def _peaks_to_keys_from_indices_or_resnums(peaks_ints, residues_in_order):
+def _pairs_to_peak_keys_auto(pairs, residues_in_order):
     """
-    peaks_ints could be:
-      - 1-based indices into residues_in_order
-      - or residue numbers
-    Returns set of keys: {(chain, resi_raw), ...}
+    AUTO-DETECT for each chain whether numbers are:
+      - PDB residue numbers (resi_num)
+      - OR 1-based indices into that chain's CA list
+    Returns peak_keys = {(chain, resi_raw), ...}
     """
-    keys = set()
-    if not peaks_ints:
-        return keys
+    if not pairs:
+        return set()
+
+    chain_to_ordered, chain_to_resnums = _build_chain_maps(residues_in_order)
+
+    # group numbers per chain
+    per_chain = {}
+    for ch, n in pairs:
+        per_chain.setdefault(ch, []).append(int(n))
+
+    peak_keys = set()
+
+    for ch, nums in per_chain.items():
+        if ch not in chain_to_ordered:
+            continue
+
+        ordered = chain_to_ordered[ch]  # list of (resi_raw, resi_num)
+        resnum_set = chain_to_resnums.get(ch, set())
+        L = len(ordered)
+
+        # count how many look like resnums vs indices
+        as_resnum = sum(1 for x in nums if x in resnum_set)
+        as_index  = sum(1 for x in nums if 1 <= x <= L)
+
+        use_index = (as_index > as_resnum)
+
+        if use_index:
+            # treat x as 1-based index into chain CA order
+            for x in nums:
+                if 1 <= x <= L:
+                    resi_raw, _ = ordered[x - 1]
+                    peak_keys.add((ch, resi_raw))
+        else:
+            # treat x as PDB residue number
+            want = set(nums)
+            for resi_raw, resi_num in ordered:
+                if resi_num in want:
+                    peak_keys.add((ch, resi_raw))
+
+    return peak_keys
+
+def _ints_to_peak_keys_auto(ints_list, residues_in_order):
+    """
+    If a peaks file contains only integers, decide whether they are:
+      - indices into residues_in_order (1-based), OR
+      - residue numbers (across all chains)
+    """
+    if not ints_list:
+        return set()
 
     N = len(residues_in_order)
     if N <= 0:
-        return keys
+        return set()
 
-    leN = sum(1 for x in peaks_ints if 1 <= x <= N)
-    if leN >= max(1, int(0.7 * len(peaks_ints))):
-        for idx in peaks_ints:
+    leN = sum(1 for x in ints_list if 1 <= x <= N)
+    # if most ints are <= N, likely indices
+    if leN >= max(1, int(0.7 * len(ints_list))):
+        keys = set()
+        for idx in ints_list:
             if 1 <= idx <= N:
                 r = residues_in_order[idx - 1]
                 keys.add((r["chain"], r["resi_raw"]))
         return keys
 
-    want_nums = set(int(x) for x in peaks_ints)
+    # else: residue numbers without chain -> mark any chain matching that resi_num
+    want_nums = set(ints_list)
+    keys = set()
     for r in residues_in_order:
         if r["resi_num"] in want_nums:
             keys.add((r["chain"], r["resi_raw"]))
@@ -300,10 +271,6 @@ def _peaks_to_keys_from_indices_or_resnums(peaks_ints, residues_in_order):
 
 def _write_bfactor_peak_pdb(pdb_in: str, pdb_out: str, peak_keys: set,
                             peak_b: float = 100.0, other_b: float = 0.0):
-    """
-    Writes a PDB where B-factor is set to peak_b for residues in peak_keys, else other_b.
-    peak_keys contains (chain, resi_raw) pairs.
-    """
     os.makedirs(os.path.dirname(pdb_out) or ".", exist_ok=True)
 
     with open(pdb_in, "r", encoding="utf-8", errors="ignore") as fin, \
@@ -320,18 +287,12 @@ def _write_bfactor_peak_pdb(pdb_in: str, pdb_out: str, peak_keys: set,
 
                 if len(line) < 66:
                     line = line.rstrip("\n").ljust(66) + "\n"
-
-                # B-factor columns 61-66 => [60:66]
                 line = line[:60] + b_str + line[66:]
             fout.write(line)
 
     return pdb_out
 
 def _extract_peak_resis_from_bfactor_pdb(pdb_path: str, b_threshold: float = 50.0):
-    """
-    Reads CA atoms and collects residues whose B >= threshold.
-    Returns dict: {chain: [resi_num, ...]}
-    """
     out = {}
     seen = set()
     with open(pdb_path, "r", encoding="utf-8", errors="ignore") as f:
@@ -371,11 +332,10 @@ def _extract_peak_resis_from_bfactor_pdb(pdb_path: str, b_threshold: float = 50.
 
 def _view_bfactor_pdb_py3dmol(pdb_path: str, title: str, sphere_radius: float = 0.9, show_sticks: bool = False):
     """
-    Reliable in ipywidgets Output: render HTML inline (no .html file created).
-    Red spheres for residues with B >= 50.
+    Use view.show() (no html file), show RED spheres for peaks (B>=50).
     """
     if not _ensure_py3dmol():
-        print("Warning: py3Dmol not available; skipping inline viewer.")
+        print("Warning: py3Dmol not available; skipping viewer.")
         _show_download(pdb_path, label=os.path.basename(pdb_path))
         return
 
@@ -397,17 +357,11 @@ def _view_bfactor_pdb_py3dmol(pdb_path: str, title: str, sphere_radius: float = 
                       {"sphere": {"color": "red", "radius": float(sphere_radius)}})
 
     view.zoomTo()
-
     display(HTML(f"<b>{title}</b>"))
     _show_download(pdb_path, label=os.path.basename(pdb_path))
-    # KEY: no file saved; render inline HTML
-    display(HTML(view._make_html()))
+    view.show()
 
 def _write_pymol_pml(pml_path: str, pdb_close: str, pdb_betw: str):
-    """
-    PyMOL script to color peaks red using B-factors (b > 50) for each object,
-    and show RED spheres on CA atoms.
-    """
     pml = f"""
 reinitialize
 bg_color white
@@ -425,7 +379,6 @@ show cartoon, closeness
 color gray80, closeness
 select c_peaks, closeness and b > 50
 color red, c_peaks
-show sticks, c_peaks
 show spheres, c_peaks and name CA
 set sphere_scale, 0.6, c_peaks
 orient closeness
@@ -438,13 +391,10 @@ show cartoon, betweenness
 color gray80, betweenness
 select b_peaks, betweenness and b > 50
 color red, b_peaks
-show sticks, b_peaks
 show spheres, b_peaks and name CA
 set sphere_scale, 0.6, b_peaks
 orient betweenness
 scene betweenness, store
-
-# Tip: Scene menu -> recall closeness / betweenness
 """
     os.makedirs(os.path.dirname(pml_path) or ".", exist_ok=True)
     with open(pml_path, "w", encoding="utf-8") as f:
@@ -513,7 +463,6 @@ def launch(
     DESC = {'description_width': '180px'}
     wide = W.Layout(width="420px", min_width="360px")
 
-    # ---------- PDB: code OR upload ----------
     pdb_code   = W.Text(value=str(cfg.get("pdb_code", "")), description="PDB code:", layout=wide, style=DESC)
     or_lbl     = W.HTML("<b>&nbsp;&nbsp;or&nbsp;&nbsp;</b>")
     pdb_upload = W.FileUpload(accept=".pdb", multiple=False, description="Choose file")
@@ -526,7 +475,6 @@ def launch(
             file_lbl.value = "No file chosen"
     pdb_upload.observe(_on_upload_change, names="value")
 
-    # Chain ID: supports comma-separated list OR empty for "all chains"
     chain_id = W.Text(
         value=str(cfg.get("chain_id", "")),
         description="Chain ID:",
@@ -547,38 +495,29 @@ def launch(
         style=DESC
     )
 
-    big_opts = cfg.get("path_length_options", [100000, 200000, 300000, 400000, 500000, 750000, 1000000, 2000000, 3000000, 4000000])
+    big_opts = cfg.get("path_length_options", [100000, 200000, 300000, 400000, 500000])
     big_default = int(cfg.get("path_length", big_opts[0] if big_opts else 100000))
     row_big, big_ctrl = _list_or_custom_row("Path length", big_opts, big_default, 1, 10_000_000, 1000)
     get_big_len = big_ctrl['get']
 
-    # ---------- Mode 2 ----------
-    init_idx_default = 1
-    init_idx = W.BoundedIntText(value=init_idx_default, min=1, max=1_000_000, step=1,
+    init_idx = W.BoundedIntText(value=1, min=1, max=1_000_000, step=1,
                                 description="Index of initial residue:", layout=wide, style=DESC)
-    init_chain_default = ""
-    init_chain = W.Text(value=init_chain_default, description="Chain of initial residue:", placeholder="A", layout=wide, style=DESC)
+    init_chain = W.Text(value="", description="Chain of initial residue:", placeholder="A", layout=wide, style=DESC)
 
     short_len_opts = [5, 8, 10, 13, 15, 20, 25, 30]
-    short_len_default = 5
-    row_short, short_ctrl = _list_or_custom_row("Length of Paths", short_len_opts, short_len_default, 1, 10_000, 1)
+    row_short, short_ctrl = _list_or_custom_row("Length of Paths", short_len_opts, 5, 1, 10_000, 1)
     get_short_len = short_ctrl['get']
 
-    num_paths_opts_mode2 = [1000, 2000, 3000, 5000, 10000, 20000, 30000, 40000, 50000]
-    num_paths_mode2_default = 1000
-    row_np2, np2_ctrl = _list_or_custom_row("Number of Paths", num_paths_opts_mode2, num_paths_mode2_default, 1, 10_000_000, 100)
+    num_paths_opts_mode2 = [1000, 2000, 3000, 5000, 10000]
+    row_np2, np2_ctrl = _list_or_custom_row("Number of Paths", num_paths_opts_mode2, 1000, 1, 10_000_000, 100)
     get_num_paths_2 = np2_ctrl['get']
 
-    # ---------- Mode 3 ----------
-    final_idx_default = 1
-    final_idx = W.BoundedIntText(value=final_idx_default, min=1, max=1_000_000, step=1,
+    final_idx = W.BoundedIntText(value=1, min=1, max=1_000_000, step=1,
                                  description="Index of final residue:", layout=wide, style=DESC)
-    final_chain_default = ""
-    final_chain = W.Text(value=final_chain_default, description="Chain of final residue:", placeholder="B", layout=wide, style=DESC)
+    final_chain = W.Text(value="", description="Chain of final residue:", placeholder="B", layout=wide, style=DESC)
 
-    num_paths_opts_mode3 = [1000, 2000, 3000, 5000, 10000, 30000, 50000]
-    num_paths_mode3_default = 1000
-    row_np3, np3_ctrl = _list_or_custom_row("Number of Paths", num_paths_opts_mode3, num_paths_mode3_default, 1, 10_000_000, 100)
+    num_paths_opts_mode3 = [1000, 2000, 3000, 5000, 10000]
+    row_np3, np3_ctrl = _list_or_custom_row("Number of Paths", num_paths_opts_mode3, 1000, 1, 10_000_000, 100)
     get_num_paths_3 = np3_ctrl['get']
 
     btn_submit = W.Button(description="Submit", button_style="success", icon="paper-plane")
@@ -638,7 +577,6 @@ def launch(
                 _FORM_ROOT.close()
         except Exception:
             pass
-
         _FORM_ROOT = None
         _LOG_OUT   = None
         clear_output(wait=True)
@@ -647,7 +585,7 @@ def launch(
     def _collect_pdb_bytes():
         if pdb_upload.value:
             (_, meta) = next(iter(pdb_upload.value.items()))
-            return meta["content"], meta["metadata"]["name"] if "metadata" in meta and "name" in meta["metadata"] else "upload.pdb"
+            return meta["content"], meta.get("metadata", {}).get("name", "upload.pdb")
         code = pdb_code.value.strip()
         if not _is_valid_pdb_code(code):
             raise ValueError("PDB code must be exactly 4 alphanumeric characters (or upload a file).")
@@ -683,7 +621,6 @@ def launch(
             try:
                 total_steps = 5
 
-                # -------- Step 1: validate inputs + save PDB --------
                 chain_global_raw = chain_id.value.strip()
                 if chain_global_raw and (not _is_valid_chain_list(chain_global_raw)):
                     raise ValueError("Chain ID must be empty (all chains) or a comma-separated list of single characters (e.g., A or A,B).")
@@ -722,7 +659,6 @@ def launch(
 
                 _progress(1, total_steps, "Input validated and PDB saved.")
 
-                # -------- Step 2: generate .cor via readpdb_strict --------
                 run_readpdb = _try_import_readpdb()
                 cor_path = None
                 if run_readpdb is None:
@@ -816,77 +752,80 @@ def launch(
                             close_mod.main()
                             betw_mod.main()
 
-                            # ---- Step 4b: write B-factor PDBs + show viewer + provide downloads ----
+                            # ---- Step 4b: write B-factor PDBs + viewer ----
                             try:
                                 base = os.path.splitext(os.path.basename(save_path))[0]
 
-                                # IMPORTANT: build residue mapping over ALL chains so Q (etc.) won't be dropped
-                                residues_in_order = _ca_residues_in_order_keys(save_path, chain_str="")
+                                # Build CA mapping consistent with user's chain selection:
+                                # if chain_global is empty -> all chains; else only those chains
+                                residues_in_order = _ca_residues_in_order(save_path, chain_str=chain_global)
 
-                                # -------- CLOSENESS peaks: prefer "closeness_peaks*" then fallback to labels --------
+                                # -------- CLOSENESS peaks: parse chain+number and auto-map (resi vs index) --------
                                 close_peak_keys = set()
-
-                                close_peaks_path = _find_first_existing(work_dir, ["closeness_peaks", "closeness_peaks.txt"])
-                                if close_peaks_path:
-                                    pairs = _parse_reschain_pairs(close_peaks_path)
-                                    if pairs:
-                                        close_peak_keys = _keys_from_chain_resnums(pairs, residues_in_order)
-
-                                if not close_peak_keys:
-                                    close_labels_path = _find_first_existing(work_dir, ["closeness_chain_labels.txt"])
-                                    if close_labels_path:
-                                        # Try value-based parsing from "16A -> closeness = 0.xxx" style
-                                        rows = _parse_chain_resnum_value_lines(close_labels_path)
-                                        if rows:
-                                            rows.sort(key=lambda x: x[0], reverse=True)
-                                            top_pairs = [(ch, rn) for (val, ch, rn) in rows[:30]]
-                                            close_peak_keys = _keys_from_chain_resnums(top_pairs, residues_in_order)
-                                        else:
-                                            # Token/table fallback
-                                            top_pairs = _parse_closeness_chain_labels_top_resnums_tokenwise(close_labels_path, top_n=30)
-                                            close_peak_keys = _keys_from_chain_resnums(top_pairs, residues_in_order)
+                                close_src = _find_first_existing(work_dir, [
+                                    "closeness_peaks", "closeness_peaks.txt",
+                                    "closeness_chain_labels.txt"
+                                ])
+                                if close_src:
+                                    rows = _parse_chain_resnum_value_lines(close_src)
+                                    if rows:
+                                        rows.sort(key=lambda x: x[0], reverse=True)
+                                        pairs = [(ch, n) for (val, ch, n) in rows[:30]]
+                                    else:
+                                        pairs = _parse_reschain_pairs(close_src)
+                                    close_peak_keys = _pairs_to_peak_keys_auto(pairs, residues_in_order)
+                                    print(f"[closeness] parsed {len(pairs)} peaks from {os.path.basename(close_src)} -> mapped {len(close_peak_keys)} residues")
+                                else:
+                                    print("Warning: no closeness peaks file found.")
 
                                 close_pdb_out = os.path.join(work_dir, f"{base}_CLOSENESS_peaks_bfac.pdb")
                                 if close_peak_keys:
                                     _write_bfactor_peak_pdb(save_path, close_pdb_out, close_peak_keys, peak_b=100.0, other_b=0.0)
                                     print(f"[PDB] Wrote closeness peaks B-factor PDB: {close_pdb_out}")
+                                    _view_bfactor_pdb_py3dmol(close_pdb_out, "Closeness peaks (B=100 → RED spheres)", sphere_radius=0.9, show_sticks=False)
                                 else:
                                     print("Warning: closeness peak set is empty; skipping closeness PDB write.")
 
-                                # -------- BETWEENNESS peaks: prefer chain+resnum parsing; fallback to int-only --------
+                                # -------- BETWEENNESS peaks: parse chain+number; fallback to pure ints; auto-map --------
                                 betw_peak_keys = set()
-                                betw_peaks_path = _find_first_existing(work_dir, ["betweenness_peaks", "betweenness_peaks.txt", "betw_peaks", "betw_peaks.txt"])
-                                if betw_peaks_path:
-                                    pairs = _parse_reschain_pairs(betw_peaks_path)
-                                    if pairs:
-                                        betw_peak_keys = _keys_from_chain_resnums(pairs, residues_in_order)
+                                betw_src = _find_first_existing(work_dir, [
+                                    "betweenness_peaks", "betweenness_peaks.txt",
+                                    "betw_peaks", "betw_peaks.txt",
+                                    "betweenness_chain_labels.txt"
+                                ])
+                                if betw_src:
+                                    rows = _parse_chain_resnum_value_lines(betw_src)
+                                    if rows:
+                                        rows.sort(key=lambda x: x[0], reverse=True)
+                                        pairs = [(ch, n) for (val, ch, n) in rows[:30]]
+                                        betw_peak_keys = _pairs_to_peak_keys_auto(pairs, residues_in_order)
+                                        print(f"[betweenness] parsed {len(pairs)} peaks from {os.path.basename(betw_src)} -> mapped {len(betw_peak_keys)} residues")
                                     else:
-                                        # fallback only if file is integer-only
-                                        betw_ints = _read_all_ints(betw_peaks_path)
-                                        betw_peak_keys = _peaks_to_keys_from_indices_or_resnums(betw_ints, residues_in_order)
+                                        pairs = _parse_reschain_pairs(betw_src)
+                                        if pairs:
+                                            betw_peak_keys = _pairs_to_peak_keys_auto(pairs, residues_in_order)
+                                            print(f"[betweenness] parsed {len(pairs)} peaks from {os.path.basename(betw_src)} -> mapped {len(betw_peak_keys)} residues")
+                                        else:
+                                            ints_list = _read_pure_ints(betw_src)
+                                            betw_peak_keys = _ints_to_peak_keys_auto(ints_list, residues_in_order)
+                                            print(f"[betweenness] parsed {len(ints_list)} ints from {os.path.basename(betw_src)} -> mapped {len(betw_peak_keys)} residues")
                                 else:
-                                    print("Warning: betweenness peaks file not found; cannot build betweenness peak set.")
+                                    print("Warning: no betweenness peaks file found.")
 
                                 betw_pdb_out = os.path.join(work_dir, f"{base}_BETWEENNESS_peaks_bfac.pdb")
                                 if betw_peak_keys:
                                     _write_bfactor_peak_pdb(save_path, betw_pdb_out, betw_peak_keys, peak_b=100.0, other_b=0.0)
                                     print(f"[PDB] Wrote betweenness peaks B-factor PDB: {betw_pdb_out}")
+                                    _view_bfactor_pdb_py3dmol(betw_pdb_out, "Betweenness peaks (B=100 → RED spheres)", sphere_radius=0.9, show_sticks=False)
                                 else:
                                     print("Warning: betweenness peak set is empty; skipping betweenness PDB write.")
 
-                                # -------- PyMOL script (optional) --------
+                                # -------- PyMOL script if both exist --------
                                 if close_peak_keys and betw_peak_keys:
                                     pml_path = os.path.join(work_dir, f"{base}_peaks_bfac_views.pml")
                                     _write_pymol_pml(pml_path, close_pdb_out, betw_pdb_out)
                                     print(f"[PyMOL] Wrote script: {pml_path}")
                                     _show_download(pml_path, label=os.path.basename(pml_path))
-
-                                # -------- Inline visualization (no .html files created) + download links --------
-                                if os.path.isfile(close_pdb_out):
-                                    _view_bfactor_pdb_py3dmol(close_pdb_out, "Closeness peaks (B=100 → RED spheres)", sphere_radius=0.9, show_sticks=False)
-
-                                if os.path.isfile(betw_pdb_out):
-                                    _view_bfactor_pdb_py3dmol(betw_pdb_out, "Betweenness peaks (B=100 → RED spheres)", sphere_radius=0.9, show_sticks=False)
 
                             except Exception as e_bfac:
                                 print(f"Warning: B-factor peak PDB generation/view failed: {e_bfac}")
