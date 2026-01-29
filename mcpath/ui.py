@@ -1,7 +1,9 @@
 # mcpath/ui.py
-import os, re, requests, yaml, importlib, shutil, sys, glob, subprocess, zipfile
+import os, re, requests, yaml, importlib, shutil, sys, glob, subprocess, zipfile, math
 from IPython.display import display, clear_output, HTML
 import ipywidgets as W
+import numpy as np
+
 
 # ---------- singletons (so New Job/Submit always uses the same log panel) ----------
 _FORM_ROOT = None
@@ -315,6 +317,231 @@ def _ints_to_peak_keys_auto(ints_list, residues_in_order):
         if r["resi_num"] in want_nums:
             keys.add((r["chain"], r["resi_raw"]))
     return keys
+
+
+def _load_float2(path: str):
+    """
+    Read two-column numeric file like:
+      node_id   value
+    Returns (x, v) as 1D numpy arrays.
+    """
+    a = np.loadtxt(path, dtype=float)
+    if a.ndim == 1 and a.size >= 2:
+        a = a.reshape(1, -1)
+    if a.shape[1] < 2:
+        raise ValueError(f"{os.path.basename(path)} must have at least 2 columns.")
+    x = a[:, 0].astype(float)
+    v = a[:, 1].astype(float)
+    return x, v
+
+
+def _peakdet(v, delta, x=None):
+    """
+    Python port of Eli Billauer peakdet, matching MATLAB logic.
+    Returns (maxtab, mintab) as Nx2 arrays: [x_pos, peak_value].
+    """
+    v = np.asarray(v, dtype=float).reshape(-1)
+    if x is None:
+        x = np.arange(1, len(v) + 1, dtype=float)
+    else:
+        x = np.asarray(x, dtype=float).reshape(-1)
+        if len(x) != len(v):
+            raise ValueError("Input vectors v and x must have same length")
+
+    delta = float(delta)
+    if not np.isfinite(delta) or delta <= 0:
+        raise ValueError("Input argument DELTA must be positive")
+
+    maxtab = []
+    mintab = []
+
+    mn = float("inf")
+    mx = -float("inf")
+    mnpos = float("nan")
+    mxpos = float("nan")
+
+    lookformax = True
+    for i in range(len(v)):
+        this = v[i]
+        if this > mx:
+            mx = this
+            mxpos = x[i]
+        if this < mn:
+            mn = this
+            mnpos = x[i]
+
+        if lookformax:
+            if this < mx - delta:
+                maxtab.append((mxpos, mx))
+                mn = this
+                mnpos = x[i]
+                lookformax = False
+        else:
+            if this > mn + delta:
+                mintab.append((mnpos, mn))
+                mx = this
+                mxpos = x[i]
+                lookformax = True
+
+    return np.array(maxtab, dtype=float), np.array(mintab, dtype=float)
+
+
+def _decode_node_id(node_id: float, chain_order: list):
+    """
+    MATLAB encoding:
+      node_id = res_num + 0.1 * chain_index
+    where chain_index is 1..chain_no.
+    """
+    node_id = float(node_id)
+    res_num = int(math.floor(node_id + 1e-6))
+    frac = node_id - res_num
+    chain_idx = int(round(frac * 10))
+
+    # Robustness for tiny float errors (e.g., 0.099999999 -> 1)
+    if chain_idx == 0 and len(chain_order) == 1:
+        chain_idx = 1
+
+    if 1 <= chain_idx <= len(chain_order):
+        return chain_order[chain_idx - 1], res_num
+    return None, None
+
+
+def _chain_resnum_to_raws(residues_in_order):
+    """
+    Map chain -> resi_num -> set(resi_raw)
+    (so we can mark all insertion-code variants, mirroring MATLAB's int64(res_num) behavior).
+    """
+    m = {}
+    for r in residues_in_order:
+        ch = r["chain"]
+        rn = r["resi_num"]
+        if rn is None:
+            continue
+        m.setdefault(ch, {}).setdefault(int(rn), set()).add(r["resi_raw"])
+    return m
+
+
+def _mcpath_peaks_like_matlab(work_dir: str, residues_in_order):
+    """
+    Reproduce MATLAB peaks.m behavior from closeness_float / betweenness_float:
+      - peakdet with delta = std(values) (MATLAB std => ddof=1)
+      - filter maxima > mean + std/4
+      - decode node_id -> (chain, resnum) using 0.1 encoding
+      - write *_peaks, *_peaks_jmol, close_min_max, between_min_max, peaks, peaks_jmol
+    Returns: (close_peak_keys, betw_peak_keys)
+    """
+    close_path = os.path.join(work_dir, "closeness_float")
+    betw_path  = os.path.join(work_dir, "betweenness_float")
+
+    if not (os.path.isfile(close_path) and os.path.isfile(betw_path)):
+        raise FileNotFoundError("closeness_float / betweenness_float not found in work_dir.")
+
+    x_c, v_c = _load_float2(close_path)
+    x_b, v_b = _load_float2(betw_path)
+
+    # MATLAB std uses N-1 (sample std) by default
+    std_c = float(np.std(v_c, ddof=1)) if len(v_c) > 1 else float(np.std(v_c))
+    std_b = float(np.std(v_b, ddof=1)) if len(v_b) > 1 else float(np.std(v_b))
+
+    close_peak, _ = _peakdet(v_c, std_c, x_c)    # maxtab
+    betw_peak,  _ = _peakdet(v_b, std_b, x_b)
+
+    thr_c = float(np.mean(v_c) + std_c / 4.0)
+    thr_b = float(np.mean(v_b) + std_b / 4.0)
+
+    filtered_close = close_peak[close_peak[:, 1] > thr_c] if close_peak.size else np.zeros((0, 2))
+    filtered_betw  = betw_peak[betw_peak[:, 1] > thr_b]  if betw_peak.size  else np.zeros((0, 2))
+
+    # Chain order (MATLAB uses chainId(i) ordering). Here we infer from PDB CA order.
+    _, _, chain_order = _build_chain_maps(residues_in_order)
+    resmap = _chain_resnum_to_raws(residues_in_order)
+
+    def _write_simple_peaks(fname_base: str, filt_arr: np.ndarray, empty_msg: str):
+        txt_path  = os.path.join(work_dir, fname_base)
+        jmol_path = os.path.join(work_dir, f"{fname_base}_jmol")
+
+        if filt_arr.shape[0] < 1:
+            with open(txt_path, "w") as f:
+                f.write(empty_msg)
+            with open(jmol_path, "w") as f:
+                f.write(empty_msg)
+            return []
+
+        decoded = []
+        for node_id, val in filt_arr:
+            ch, rn = _decode_node_id(node_id, chain_order)
+            if ch is None:
+                continue
+            decoded.append((ch, int(rn), float(val)))
+
+        with open(txt_path, "w") as f:
+            for ch, rn, _ in decoded:
+                f.write(f"{int(rn)}{ch}\n")
+
+        with open(jmol_path, "w") as f:
+            for ch, rn, _ in decoded:
+                f.write(f"{int(rn)}{ch} ALA\n")
+
+        return decoded
+
+    betw_dec  = _write_simple_peaks("betweenness_peaks", filtered_betw,  "There is no betweenness peak found.")
+    close_dec = _write_simple_peaks("closeness_peaks",   filtered_close, "There is no closeness peak found.")
+
+    # close_min_max / between_min_max
+    with open(os.path.join(work_dir, "close_min_max"), "w") as f:
+        f.write(f"{float(np.max(v_c) + 0.01)}\n{float(np.min(v_c) - 0.01)}\n")
+    with open(os.path.join(work_dir, "between_min_max"), "w") as f:
+        f.write(f"{float(np.max(v_b) + 0.01)}\n{float(np.min(v_b) - 0.01)}\n")
+
+    # Combined peaks file:
+    # MATLAB code has a bug (abs(...)<Inf always true). A meaningful equivalent is to JOIN on the same node_id.
+    # We use 1-decimal rounding because encoding is res + 0.1*chainIndex.
+    close_map = {round(float(node), 1): float(val) for (node, val) in filtered_close} if filtered_close.size else {}
+    betw_map  = {round(float(node), 1): float(val) for (node, val) in filtered_betw}  if filtered_betw.size  else {}
+    common_nodes = sorted(set(close_map).intersection(set(betw_map)))
+
+    peaks_path = os.path.join(work_dir, "peaks")
+    peaks_jmol = os.path.join(work_dir, "peaks_jmol")
+
+    if not common_nodes:
+        with open(peaks_path, "w") as f:
+            f.write("There is no closeness or betweenness peak found.")
+        with open(peaks_jmol, "w") as f:
+            f.write("There is no closeness or betweenness peak found.")
+    else:
+        with open(peaks_path, "w") as f:
+            for node in common_nodes:
+                ch, rn = _decode_node_id(node, chain_order)
+                if ch is None:
+                    continue
+                f.write(f"{int(rn)}{ch}\t{close_map[node]:.6f}\t{betw_map[node]:.6f}\n")
+        with open(peaks_jmol, "w") as f:
+            for node in common_nodes:
+                ch, rn = _decode_node_id(node, chain_order)
+                if ch is None:
+                    continue
+                f.write(f"{int(rn)}{ch} ALA\n")
+
+    # Build peak_keys sets for B-factor PDB writing
+    close_keys = set()
+    for node_id, _ in filtered_close:
+        ch, rn = _decode_node_id(node_id, chain_order)
+        if ch is None:
+            continue
+        for resi_raw in resmap.get(ch, {}).get(int(rn), set()):
+            close_keys.add((ch, resi_raw))
+
+    betw_keys = set()
+    for node_id, _ in filtered_betw:
+        ch, rn = _decode_node_id(node_id, chain_order)
+        if ch is None:
+            continue
+        for resi_raw in resmap.get(ch, {}).get(int(rn), set()):
+            betw_keys.add((ch, resi_raw))
+
+    return close_keys, betw_keys
+
+
 
 # -------------------- B-factor PDB (FULL protein; peaks encoded in B) --------------------
 def _write_bfactor_peak_pdb(pdb_in: str, pdb_out: str, peak_keys: set,
@@ -887,82 +1114,49 @@ def launch(
                         finally:
                             os.chdir(old_cwd2)
 
-                        # ---- Step 4b: peaks -> B-factor PDBs (FULL protein) + also create peak-only PDBs for archive ----
+                        # ---- Step 4b: peaks (MATLAB-like) -> B-factor PDBs (FULL protein) + peak-only PDBs for archive ----
                         base = os.path.splitext(os.path.basename(save_path))[0]
                         residues_in_order = _ca_residues_in_order(save_path, chain_str=chain_global)
-
-                        # -------- CLOSENESS peaks --------
-                        close_peak_keys = set()
-                        close_src = _find_first_existing(work_dir, [
-                            "closeness_peaks", "closeness_peaks.txt",
-                            "closeness_chain_labels.txt"
-                        ])
-                        if close_src:
-                            rows = _parse_chain_resnum_value_lines(close_src)
-                            if rows:
-                                rows.sort(key=lambda x: x[0], reverse=True)
-                                pairs = [(ch, n) for (val, ch, n) in rows[:30]]
-                            else:
-                                pairs = _parse_reschain_pairs(close_src)
-                            close_peak_keys = _pairs_to_peak_keys_auto(pairs, residues_in_order)
-                            print(f"[closeness] parsed {len(pairs)} peaks from {os.path.basename(close_src)} -> mapped {len(close_peak_keys)} residues")
-                        else:
-                            print("Warning: no closeness peaks file found.")
-
+                        
+                        close_peak_keys, betw_peak_keys = set(), set()
+                        try:
+                            close_peak_keys, betw_peak_keys = _mcpath_peaks_like_matlab(work_dir, residues_in_order)
+                            print(f"[peaks.m-like] closeness keys: {len(close_peak_keys)} | betweenness keys: {len(betw_peak_keys)}")
+                        except Exception as e_pk:
+                            print(f"Warning: MATLAB-like peak selection failed; falling back to file parsing. Reason: {e_pk}")
+                            # (Optional) fallback: keep your old parsing logic here if you want.
+                        
+                        # -------- CLOSENESS PDBs --------
                         close_pdb_out = os.path.join(work_dir, f"{base}_CLOSENESS_peaks_bfac.pdb")
                         close_only_pdb = None
                         if close_peak_keys:
                             _write_bfactor_peak_pdb(save_path, close_pdb_out, close_peak_keys, peak_b=100.0, other_b=0.0)
                             viewers.append((close_pdb_out, "Closeness peaks (B=100 → RED spheres)", 0.9, False))
-
-                            # NEW (for archive only): peak-only PDB
+                        
                             close_only_pdb = os.path.join(work_dir, f"{base}_CLOSENESS_peaks_ONLY.pdb")
                             close_only_pdb = _write_peak_only_pdb(save_path, close_only_pdb, close_peak_keys, peak_b=100.0)
                             if not close_only_pdb:
                                 print("Warning: closeness PEAK-ONLY PDB not written (no atoms matched).")
                         else:
                             print("Warning: closeness peak set is empty; skipping closeness PDB write.")
-
-                        # -------- BETWEENNESS peaks --------
-                        betw_peak_keys = set()
-                        betw_src = _find_first_existing(work_dir, [
-                            "betweenness_peaks", "betweenness_peaks.txt",
-                            "betw_peaks", "betw_peaks.txt",
-                            "betweenness_chain_labels.txt"
-                        ])
-                        if betw_src:
-                            rows = _parse_chain_resnum_value_lines(betw_src)
-                            if rows:
-                                rows.sort(key=lambda x: x[0], reverse=True)
-                                pairs = [(ch, n) for (val, ch, n) in rows[:30]]
-                                betw_peak_keys = _pairs_to_peak_keys_auto(pairs, residues_in_order)
-                                print(f"[betweenness] parsed {len(pairs)} peaks from {os.path.basename(betw_src)} -> mapped {len(betw_peak_keys)} residues")
-                            else:
-                                pairs = _parse_reschain_pairs(betw_src)
-                                if pairs:
-                                    betw_peak_keys = _pairs_to_peak_keys_auto(pairs, residues_in_order)
-                                    print(f"[betweenness] parsed {len(pairs)} peaks from {os.path.basename(betw_src)} -> mapped {len(betw_peak_keys)} residues")
-                                else:
-                                    ints_list = _read_pure_ints(betw_src)
-                                    betw_peak_keys = _ints_to_peak_keys_auto(ints_list, residues_in_order)
-                                    print(f"[betweenness] parsed {len(ints_list)} ints from {os.path.basename(betw_src)} -> mapped {len(betw_peak_keys)} residues")
-                        else:
-                            print("Warning: no betweenness peaks file found.")
-
+                        
+                        # -------- BETWEENNESS PDBs --------
                         betw_pdb_out = os.path.join(work_dir, f"{base}_BETWEENNESS_peaks_bfac.pdb")
                         betw_only_pdb = None
                         if betw_peak_keys:
                             _write_bfactor_peak_pdb(save_path, betw_pdb_out, betw_peak_keys, peak_b=100.0, other_b=0.0)
                             viewers.append((betw_pdb_out, "Betweenness peaks (B=100 → RED spheres)", 0.9, False))
-
-                            # NEW (for archive only): peak-only PDB
+                        
                             betw_only_pdb = os.path.join(work_dir, f"{base}_BETWEENNESS_peaks_ONLY.pdb")
                             betw_only_pdb = _write_peak_only_pdb(save_path, betw_only_pdb, betw_peak_keys, peak_b=100.0)
                             if not betw_only_pdb:
                                 print("Warning: betweenness PEAK-ONLY PDB not written (no atoms matched).")
                         else:
                             print("Warning: betweenness peak set is empty; skipping betweenness PDB write.")
+                        
+                        
 
+                        
                         # -------- NEW: make archive (original PDB + 2 peak-only PDBs + chain plots) --------
                         plot_files = _collect_chain_plot_files(work_dir)
 
