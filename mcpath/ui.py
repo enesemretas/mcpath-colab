@@ -874,6 +874,7 @@ def launch(
         pdb_upload = None  # colab mode: ipywidgets FileUpload kullanmıyoruz
     
         def _on_click_upload(_):
+            btn_submit.disabled = True
             file_lbl.value = "Uploading..."
             try:
                 from google.colab import files
@@ -889,6 +890,9 @@ def launch(
                 _UPLOADED_PDB["name"] = name
                 _UPLOADED_PDB["content"] = content
                 file_lbl.value = name
+            finally:
+                btn_submit.disabled = False
+                
             except Exception as e:
                 file_lbl.value = "Upload failed"
                 _UPLOADED_PDB["content"] = None
@@ -923,11 +927,6 @@ def launch(
         pdb_upload.observe(_on_upload_change, names="value")
     
 
-    def _on_upload_change(_):
-        content, name = _get_upload_bytes_and_name(pdb_upload)
-        file_lbl.value = name if (content is not None) else "No file chosen"
-
-    pdb_upload.observe(_on_upload_change, names="value")
 
     chain_id = W.Text(
         value=str(cfg.get("chain_id", "")),
@@ -1050,11 +1049,8 @@ def launch(
             raise ValueError("PDB code must be exactly 4 alphanumeric characters (or upload a file).")
         return _fetch_rcsb(code), f"{code.upper()}.pdb"
 
+
     
-        code = pdb_code.value.strip()
-        if not _is_valid_pdb_code(code):
-            raise ValueError("PDB code must be exactly 4 alphanumeric characters (or upload a file).")
-        return _fetch_rcsb(code), f"{code.upper()}.pdb"
 
 
     def _try_import_readpdb():
