@@ -856,7 +856,11 @@ def launch(
 
     pdb_code   = W.Text(value=str(cfg.get("pdb_code", "")), description="PDB code:", layout=wide, style=DESC)
     or_lbl     = W.HTML("<b>&nbsp;&nbsp;or&nbsp;&nbsp;</b>")
+    btn_submit = W.Button(description="Submit", button_style="success", icon="paper-plane")
+    btn_new_job = W.Button(description="New Job",  button_style="info", icon="plus")
     # --- Upload state (shared) ---
+
+    
     _UPLOADED_PDB = {"content": None, "name": None}
     
     file_lbl = W.Label("No file chosen")
@@ -969,8 +973,7 @@ def launch(
     row_np3, np3_ctrl = _list_or_custom_row("Number of Paths", num_paths_opts_mode3, 1000, 1, 10_000_000, 100)
     get_num_paths_3 = np3_ctrl['get']
 
-    btn_submit = W.Button(description="Submit", button_style="success", icon="paper-plane")
-    btn_new_job = W.Button(description="New Job",  button_style="info", icon="plus")
+
 
     if _LOG_OUT is None:
         _LOG_OUT = W.Output()
