@@ -1036,6 +1036,9 @@ def launch(
         style={"button_width": "42px"}
     )
 
+    init_chain_label  = W.HTML("<b>Initial Chain ID</b>", layout=W.Layout(margin="0 0 2px 0"))
+    final_chain_label = W.HTML("<b>Final Chain ID</b>",   layout=W.Layout(margin="0 0 2px 0"))
+
     num_paths_opts_mode3 = [1000, 2000, 3000, 5000, 10000]
     row_np3, np3_ctrl = _list_or_custom_row("Number of Paths", num_paths_opts_mode3, 1000, 1, 10_000_000, 100)
     get_num_paths_3 = np3_ctrl['get']
@@ -1053,8 +1056,16 @@ def launch(
     )
 
     functional_box = W.VBox([row_big])
-    init_chain_row  = W.Box([init_chain_rb], layout=W.Layout(display="flex", flex_flow="row wrap", gap="8px"))
-    final_chain_row = W.Box([final_chain_rb], layout=W.Layout(display="flex", flex_flow="row wrap", gap="8px"))
+    init_chain_row = W.VBox([
+        init_chain_label,
+        W.Box([init_chain_rb], layout=W.Layout(display="flex", flex_flow="row wrap", gap="8px"))
+    ])
+    
+    final_chain_row = W.VBox([
+        final_chain_label,
+        W.Box([final_chain_rb], layout=W.Layout(display="flex", flex_flow="row wrap", gap="8px"))
+    ])
+
     
         
     # Mode2: index -> chain -> length -> number_paths
