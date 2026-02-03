@@ -89,6 +89,30 @@ def _fetch_rcsb(code: str) -> bytes:
     r.raise_for_status()
     return r.content
 
+def _chains_from_pdb_bytes(pdb_bytes: bytes):
+    """
+    Return sorted unique chain IDs seen in ATOM/HETATM records.
+    """
+    chains = []
+    seen = set()
+    try:
+        txt = pdb_bytes.decode("utf-8", errors="ignore")
+    except Exception:
+        return []
+
+    for line in txt.splitlines():
+        if not (line.startswith("ATOM") or line.startswith("HETATM")):
+            continue
+        if len(line) < 22:
+            continue
+        ch = line[21].strip() or " "  # blank chain possible
+        if ch not in seen:
+            seen.add(ch)
+            chains.append(ch)
+    # keep original order (more useful than alphabetical)
+    return chains
+
+
 def _logo_widget(branding: dict):
     url = (branding.get("logo_url") or "").strip()
     if not url:
@@ -857,6 +881,20 @@ def launch(
     pdb_code   = W.Text(value=str(cfg.get("pdb_code", "")), description="PDB code:", layout=wide, style=DESC)
     or_lbl     = W.HTML("<b>&nbsp;&nbsp;or&nbsp;&nbsp;</b>")
     btn_submit = W.Button(description="Submit", button_style="success", icon="paper-plane")
+    btn_load   = W.Button(description="Load", button_style="", icon="refresh")
+    btn_submit.disabled = True  # Load yapılmadan submit olmasın
+    
+    chain_select = W.SelectMultiple(
+        options=[],
+        value=(),
+        description="Chains:",
+        layout=W.Layout(width="420px", min_width="360px", height="120px"),
+        style=DESC
+    )
+    
+    view_out = W.Output()  # py3Dmol veya kısa info göstermek için
+
+    
     btn_new_job = W.Button(description="New Job",  button_style="info", icon="plus")
     # --- Upload state (shared) ---
 
@@ -981,9 +1019,10 @@ def launch(
 
     upload_widget = btn_upload if btn_upload is not None else pdb_upload
     pdb_row = W.HBox(
-        [pdb_code, W.HTML("&nbsp;"), or_lbl, upload_widget, file_lbl],
+        [pdb_code, W.HTML("&nbsp;"), or_lbl, upload_widget, file_lbl, btn_load],
         layout=W.Layout(align_items="center", justify_content="flex-start", flex_flow="row wrap", gap="10px")
     )
+
     functional_box = W.VBox([row_big])
     mode2_box = W.VBox([init_idx, init_chain, row_short, row_np2])
     mode3_box = W.VBox([init_idx, init_chain, final_idx, final_chain, row_np3])
@@ -1010,7 +1049,9 @@ def launch(
         functional_box,
         mode2_box,
         mode3_box,
+        chain_select,
         chain_id, email,
+        view_out,
         W.HBox([btn_submit, btn_new_job]),
         W.HTML("<hr>"),
         out
@@ -1020,6 +1061,78 @@ def launch(
     display(root)
 
     # -------------------- handlers --------------------
+    def _update_chain_ui_and_view(pdb_bytes: bytes, pdb_name: str):
+        chains = _chains_from_pdb_bytes(pdb_bytes)
+    
+        # Chain yoksa bile submit aç (tek chain gibi davran)
+        if not chains:
+            chain_select.options = []
+            chain_select.value = ()
+            chain_id.value = ""
+            btn_submit.disabled = False
+            with view_out:
+                clear_output(wait=True)
+                print("Loaded PDB but no chain IDs detected (will run as 'all chains').")
+            return
+
+        chain_select.options = chains
+    
+        # default: all selected
+        chain_select.value = tuple(chains)
+    
+        # chain_id text otomatik doldur
+        chain_id.value = ",".join(chain_select.value) if chain_select.value else ""
+    
+        btn_submit.disabled = False
+    
+        # basit py3Dmol preview (seçili chain kırmızı)
+        with view_out:
+            clear_output(wait=True)
+            if not _ensure_py3dmol():
+                print(f"Loaded {pdb_name}. Chains: {', '.join(chains)}")
+                return
+    
+            _enable_colab_widgets()
+            import py3Dmol
+    
+            pdb_text = pdb_bytes.decode("utf-8", errors="ignore")
+            v = py3Dmol.view(width=850, height=420)
+            v.addModel(pdb_text, "pdb")
+            v.setStyle({}, {"cartoon": {"color": "lightgray"}})
+    
+            sel = list(chain_select.value) if chain_select.value else []
+            for ch in sel:
+                v.addStyle({"chain": ch}, {"cartoon": {"color": "red"}})
+    
+            v.zoomTo()
+            display(HTML(f"<b>Loaded:</b> {pdb_name} &nbsp; | &nbsp; <b>Chains:</b> {', '.join(chains)}"))
+            v.show()
+
+
+    def _on_chain_select_change(ch):
+        # chain_id alanını sync et
+        sel = list(chain_select.value) if chain_select.value else []
+        chain_id.value = ",".join(sel) if sel else ""
+    
+    chain_select.observe(_on_chain_select_change, names="value")
+
+
+    def on_load(_):
+        _LOG_OUT.clear_output(wait=True)
+        with _LOG_OUT:
+            try:
+                pdb_bytes, pdb_name = _collect_pdb_bytes()
+                _progress(0, 1, f"PDB loaded into UI: {pdb_name}")
+            except Exception as e:
+                print("Error:", e)
+                btn_submit.disabled = True
+                return
+    
+        _update_chain_ui_and_view(pdb_bytes, pdb_name)
+    
+    btn_load.on_click(on_load)
+
+        
     def on_new_job(_):
         global _FORM_ROOT, _LOG_OUT
         try:
@@ -1087,10 +1200,10 @@ def launch(
             try:
                 total_steps = 5
 
-                chain_global_raw = chain_id.value.strip()
-                if chain_global_raw and (not _is_valid_chain_list(chain_global_raw)):
-                    raise ValueError("Chain ID must be empty (all chains) or a comma-separated list of single characters (e.g., A or A,B).")
-                chain_global = chain_global_raw  # may be ""
+                # Chain seçimi (SelectMultiple) -> hiçbir şey seçili değilse "all chains"
+                sel = list(chain_select.value) if getattr(chain_select, "value", None) else []
+                chain_global = ",".join(sel) if sel else ""
+
 
                 if not _is_valid_email(email.value.strip()):
                     raise ValueError("Invalid email format.")
@@ -1134,7 +1247,9 @@ def launch(
                     try:
                         cor_path = run_readpdb(input_path=input_path)
                     except TypeError:
-                        cor_path = run_readpdb(pdb_path=save_path, chain=(chain_global or "A"))
+                        fallback_chain = (chain_global.split(",")[0].strip() if chain_global else "A")
+                        cor_path = run_readpdb(pdb_path=save_path, chain=fallback_chain)
+
 
                     if cor_path and os.path.isfile(cor_path):
                         _progress(2, total_steps, ".cor coordinate file generated.")
