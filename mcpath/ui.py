@@ -856,70 +856,70 @@ def launch(
 
     pdb_code   = W.Text(value=str(cfg.get("pdb_code", "")), description="PDB code:", layout=wide, style=DESC)
     or_lbl     = W.HTML("<b>&nbsp;&nbsp;or&nbsp;&nbsp;</b>")
-# --- Upload state (shared) ---
-_UPLOADED_PDB = {"content": None, "name": None}
-
-file_lbl = W.Label("No file chosen")
-
-def _is_colab():
-    try:
-        import google.colab  # noqa
-        return True
-    except Exception:
-        return False
-
-if _is_colab():
-    btn_upload = W.Button(description="Upload PDB", icon="upload", button_style="")
-    pdb_upload = None  # Colab mode: ipywidgets FileUpload kullanmıyoruz
-
-    def _on_click_upload(_):
-        btn_submit.disabled = True
-        file_lbl.value = "Uploading..."
+    # --- Upload state (shared) ---
+    _UPLOADED_PDB = {"content": None, "name": None}
+    
+    file_lbl = W.Label("No file chosen")
+    
+    def _is_colab():
         try:
-            from google.colab import files
-            uploaded = files.upload()
-            if not uploaded:
+            import google.colab  # noqa
+            return True
+        except Exception:
+            return False
+    
+    if _is_colab():
+        btn_upload = W.Button(description="Upload PDB", icon="upload", button_style="")
+        pdb_upload = None  # Colab mode: ipywidgets FileUpload kullanmıyoruz
+    
+        def _on_click_upload(_):
+            btn_submit.disabled = True
+            file_lbl.value = "Uploading..."
+            try:
+                from google.colab import files
+                uploaded = files.upload()
+                if not uploaded:
+                    file_lbl.value = "No file chosen"
+                    _UPLOADED_PDB["content"] = None
+                    _UPLOADED_PDB["name"] = None
+                    return
+    
+                name, content = next(iter(uploaded.items()))
+                _UPLOADED_PDB["name"] = name
+                _UPLOADED_PDB["content"] = content
+                file_lbl.value = name
+    
+            except Exception as e:
+                file_lbl.value = "Upload failed"
+                _UPLOADED_PDB["content"] = None
+                _UPLOADED_PDB["name"] = None
+                print("Upload error:", e)
+    
+            finally:
+                btn_submit.disabled = False
+    
+        btn_upload.on_click(_on_click_upload)
+    
+    else:
+        pdb_upload = W.FileUpload(accept=".pdb", multiple=False, description="Choose file")
+        btn_upload = None
+    
+        def _on_upload_change(_):
+            content, name = _get_upload_bytes_and_name(pdb_upload)
+            if content is None:
                 file_lbl.value = "No file chosen"
                 _UPLOADED_PDB["content"] = None
                 _UPLOADED_PDB["name"] = None
                 return
-
-            name, content = next(iter(uploaded.items()))
-            _UPLOADED_PDB["name"] = name
+    
+            if isinstance(content, memoryview):
+                content = content.tobytes()
+    
             _UPLOADED_PDB["content"] = content
-            file_lbl.value = name
-
-        except Exception as e:
-            file_lbl.value = "Upload failed"
-            _UPLOADED_PDB["content"] = None
-            _UPLOADED_PDB["name"] = None
-            print("Upload error:", e)
-
-        finally:
-            btn_submit.disabled = False
-
-    btn_upload.on_click(_on_click_upload)
-
-else:
-    pdb_upload = W.FileUpload(accept=".pdb", multiple=False, description="Choose file")
-    btn_upload = None
-
-    def _on_upload_change(_):
-        content, name = _get_upload_bytes_and_name(pdb_upload)
-        if content is None:
-            file_lbl.value = "No file chosen"
-            _UPLOADED_PDB["content"] = None
-            _UPLOADED_PDB["name"] = None
-            return
-
-        if isinstance(content, memoryview):
-            content = content.tobytes()
-
-        _UPLOADED_PDB["content"] = content
-        _UPLOADED_PDB["name"] = name or "upload.pdb"
-        file_lbl.value = _UPLOADED_PDB["name"]
-
-    pdb_upload.observe(_on_upload_change, names="value")
+            _UPLOADED_PDB["name"] = name or "upload.pdb"
+            file_lbl.value = _UPLOADED_PDB["name"]
+    
+        pdb_upload.observe(_on_upload_change, names="value")
 
     
 
