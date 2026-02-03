@@ -884,13 +884,21 @@ def launch(
     btn_load   = W.Button(description="Load", button_style="", icon="refresh")
     btn_submit.disabled = True  # Load yapılmadan submit olmasın
     
-    chain_select = W.SelectMultiple(
-        options=[],
-        value=(),
-        description="Chains:",
-        layout=W.Layout(width="420px", min_width="360px", height="120px"),
-        style=DESC
+    # --- Global chain selection (MULTI via checkboxes) ---
+    chain_all_cb = W.Checkbox(
+        value=True,
+        description="All chains",
+        indent=False,
+        layout=W.Layout(width="200px")
     )
+    
+    chain_checks_box = W.VBox([])  # Load sonrası chain checkboxları burada oluşacak
+    
+    chain_global_box = W.VBox(
+        [W.HTML("<b>Chain ID selection:</b>"), chain_all_cb, chain_checks_box],
+        layout=W.Layout(border="1px solid #eee", padding="8px", width="auto")
+    )
+
     
     view_out = W.Output()  # py3Dmol veya kısa info göstermek için
 
@@ -993,7 +1001,13 @@ def launch(
 
     init_idx = W.BoundedIntText(value=1, min=1, max=1_000_000, step=1,
                                 description="Index of initial residue:", layout=wide, style=DESC)
-    init_chain = W.Text(value="", description="Chain of initial residue:", placeholder="A", layout=wide, style=DESC)
+    init_chain_rb = W.RadioButtons(
+        options=[],
+        value=None,
+        description="Chain of initial residue:",
+        layout=W.Layout(width="auto"),
+        style=DESC
+    )
 
     short_len_opts = [5, 8, 10, 13, 15, 20, 25, 30]
     row_short, short_ctrl = _list_or_custom_row("Length of Paths", short_len_opts, 5, 1, 10_000, 1)
@@ -1005,7 +1019,13 @@ def launch(
 
     final_idx = W.BoundedIntText(value=1, min=1, max=1_000_000, step=1,
                                  description="Index of final residue:", layout=wide, style=DESC)
-    final_chain = W.Text(value="", description="Chain of final residue:", placeholder="B", layout=wide, style=DESC)
+    final_chain_rb = W.RadioButtons(
+        options=[],
+        value=None,
+        description="Chain of final residue:",
+        layout=W.Layout(width="auto"),
+        style=DESC
+    )
 
     num_paths_opts_mode3 = [1000, 2000, 3000, 5000, 10000]
     row_np3, np3_ctrl = _list_or_custom_row("Number of Paths", num_paths_opts_mode3, 1000, 1, 10_000_000, 100)
@@ -1024,8 +1044,8 @@ def launch(
     )
 
     functional_box = W.VBox([row_big])
-    mode2_box = W.VBox([init_idx, init_chain, row_short, row_np2])
-    mode3_box = W.VBox([init_idx, init_chain, final_idx, final_chain, row_np3])
+    mode2_box = W.VBox([init_idx, init_chain_rb, row_short, row_np2])
+    mode3_box = W.VBox([init_idx, init_chain_rb, final_idx, final_chain_rb, row_np3])
 
     def _sync_mode(*_):
         functional_box.layout.display = ""
@@ -1044,48 +1064,111 @@ def launch(
     body_children += [
         W.HTML(f"<h3>{show_title}</h3>"),
         pdb_row,
+    
+        chain_global_box,   # <-- buraya eklendi
+    
         W.HTML("<b>Prediction of:</b>"),
         pred_type,
         functional_box,
         mode2_box,
         mode3_box,
-        chain_select,
-        chain_id, email,
+    
+        chain_id, email,    # chain_id backend’de kalsın
         view_out,
         W.HBox([btn_submit, btn_new_job]),
         W.HTML("<hr>"),
         out
     ]
+
     root = W.VBox(body_children, layout=W.Layout(width="auto"))
     _FORM_ROOT = root
     display(root)
 
     # -------------------- handlers --------------------
+
+    def _get_selected_global_chains():
+        """
+        Returns list of selected chains.
+        If All is checked OR none selected => [] meaning "all chains"
+        """
+        if chain_all_cb.value:
+            return []
+        sels = []
+        for cb in chain_checks_box.children:
+            if getattr(cb, "value", False):
+                sels.append(cb.description)
+        return sels if sels else []  # none => treat as all chains
+    
+    def _sync_chain_id_and_init_final_options():
+        # chain_id sync (backend uses this)
+        sel = _get_selected_global_chains()
+        chain_id.value = ",".join(sel) if sel else ""
+    
+        all_chains = [cb.description for cb in chain_checks_box.children]
+        allowed = sel if sel else all_chains
+    
+        init_chain_rb.options  = [(f"Chain {c}", c) for c in allowed]
+        final_chain_rb.options = [(f"Chain {c}", c) for c in allowed]
+    
+        if allowed:
+            if init_chain_rb.value not in allowed:
+                init_chain_rb.value = allowed[0]
+            if final_chain_rb.value not in allowed:
+                final_chain_rb.value = allowed[0]
+        else:
+            init_chain_rb.value = None
+            final_chain_rb.value = None
+    
+    def _on_all_chains_toggle(change):
+        if change.get("name") != "value":
+            return
+        if bool(change["new"]):
+            for cb in chain_checks_box.children:
+                cb.value = True
+        _sync_chain_id_and_init_final_options()
+    
+    chain_all_cb.observe(_on_all_chains_toggle, names="value")
+    
+    def _on_any_chain_checkbox(change):
+        if change.get("name") != "value":
+            return
+        if chain_checks_box.children:
+            all_selected = all(cb.value for cb in chain_checks_box.children)
+            # keep All chains consistent, but avoid recursion loops
+            chain_all_cb.unobserve(_on_all_chains_toggle, names="value")
+            chain_all_cb.value = all_selected
+            chain_all_cb.observe(_on_all_chains_toggle, names="value")
+        _sync_chain_id_and_init_final_options()
+
+
     def _update_chain_ui_and_view(pdb_bytes: bytes, pdb_name: str):
         chains = _chains_from_pdb_bytes(pdb_bytes)
     
         # Chain yoksa bile submit aç (tek chain gibi davran)
         if not chains:
-            chain_select.options = []
-            chain_select.value = ()
+            chain_checks_box.children = ()
             chain_id.value = ""
             btn_submit.disabled = False
             with view_out:
                 clear_output(wait=True)
                 print("Loaded PDB but no chain IDs detected (will run as 'all chains').")
             return
-
-        chain_select.options = chains
     
-        # default: all selected
-        chain_select.value = tuple(chains)
+        # Create chain checkboxes (default checked)
+        cbs = []
+        for ch in chains:
+            cb = W.Checkbox(value=True, description=ch, indent=False, layout=W.Layout(width="90px"))
+            cb.observe(_on_any_chain_checkbox, names="value")
+            cbs.append(cb)
+        chain_checks_box.children = tuple(cbs)
     
-        # chain_id text otomatik doldur
-        chain_id.value = ",".join(chain_select.value) if chain_select.value else ""
+        # Default: All chains ON
+        chain_all_cb.value = True
+        _sync_chain_id_and_init_final_options()
     
         btn_submit.disabled = False
     
-        # basit py3Dmol preview (seçili chain kırmızı)
+        # py3Dmol preview (selected chains red; if "all", highlight all)
         with view_out:
             clear_output(wait=True)
             if not _ensure_py3dmol():
@@ -1100,21 +1183,16 @@ def launch(
             v.addModel(pdb_text, "pdb")
             v.setStyle({}, {"cartoon": {"color": "lightgray"}})
     
-            sel = list(chain_select.value) if chain_select.value else []
-            for ch in sel:
+            sel = _get_selected_global_chains()
+            highlight = chains if (not sel) else sel
+            for ch in highlight:
                 v.addStyle({"chain": ch}, {"cartoon": {"color": "red"}})
     
             v.zoomTo()
             display(HTML(f"<b>Loaded:</b> {pdb_name} &nbsp; | &nbsp; <b>Chains:</b> {', '.join(chains)}"))
             v.show()
-
-
-    def _on_chain_select_change(ch):
-        # chain_id alanını sync et
-        sel = list(chain_select.value) if chain_select.value else []
-        chain_id.value = ",".join(sel) if sel else ""
     
-    chain_select.observe(_on_chain_select_change, names="value")
+
 
 
     def on_load(_):
@@ -1201,8 +1279,9 @@ def launch(
                 total_steps = 5
 
                 # Chain seçimi (SelectMultiple) -> hiçbir şey seçili değilse "all chains"
-                sel = list(chain_select.value) if getattr(chain_select, "value", None) else []
+                sel = _get_selected_global_chains()
                 chain_global = ",".join(sel) if sel else ""
+
 
 
                 if not _is_valid_email(email.value.strip()):
@@ -1219,19 +1298,21 @@ def launch(
                 if mode == "functional":
                     rows = ["1", pdb_name, chain_global, str(get_big_len()), (email.value.strip() or "-")]
                 elif mode == "paths_init_len":
-                    if not _is_valid_chain(init_chain.value or ""):
+                    if not _is_valid_chain(init_chain_rb.value or ""):
                         raise ValueError("Chain of initial residue must be a single character.")
                     rows = ["2", pdb_name, chain_global, str(get_short_len()), str(get_num_paths_2()),
-                            str(int(init_idx.value)), (init_chain.value or "").strip(), (email.value.strip() or "-")]
+                            str(int(init_idx.value)), (init_chain_rb.value or "").strip(), (email.value.strip() or "-")]
+
                 else:
-                    if not _is_valid_chain(init_chain.value or ""):
+                    if not _is_valid_chain(init_chain_rb.value or ""):
                         raise ValueError("Chain of initial residue must be a single character.")
-                    if not _is_valid_chain(final_chain.value or ""):
+                    if not _is_valid_chain(final_chain_rb.value or ""):
                         raise ValueError("Chain of final residue must be a single character.")
                     rows = ["3", pdb_name, chain_global,
-                            str(int(init_idx.value)), (init_chain.value or "").strip(),
-                            str(int(final_idx.value)), (final_chain.value or "").strip(),
+                            str(int(init_idx.value)), (init_chain_rb.value or "").strip(),
+                            str(int(final_idx.value)), (final_chain_rb.value or "").strip(),
                             (email.value.strip() or "-")]
+
 
                 with open(input_path, "w") as f:
                     for r in rows:
@@ -1421,9 +1502,9 @@ def launch(
                 else:
                     data.update({
                         "index_initial": int(init_idx.value),
-                        "chain_initial": (init_chain.value or "").strip(),
+                        "chain_initial": (init_chain_rb.value or "").strip(),
                         "index_final": int(final_idx.value),
-                        "chain_final": (final_chain.value or "").strip(),
+                        "chain_final": (final_chain_rb.value or "").strip(),
                         "number_paths": int(get_num_paths_3())
                     })
 
