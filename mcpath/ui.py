@@ -886,11 +886,12 @@ def launch(
     
     # --- Global chain selection (MULTI via checkboxes) ---
     chain_all_cb = W.Checkbox(
-        value=True,
+        value=False,                      # <-- default artık ALL değil
         description="All chains",
         indent=False,
         layout=W.Layout(width="200px")
     )
+
     
     chain_checks_box = W.HBox(
         [],
@@ -1009,12 +1010,12 @@ def launch(
 
     init_idx = W.BoundedIntText(value=1, min=1, max=1_000_000, step=1,
                                 description="Index of initial residue:", layout=wide, style=DESC)
-    init_chain_rb = W.RadioButtons(
+    init_chain_rb = W.ToggleButtons(
         options=[],
         value=None,
-        description="Initial chain:",
+        description="",  # başında Chain yazmasın
         layout=W.Layout(width="auto"),
-        style=DESC
+        style={"button_width": "42px"}  # gerekirse 50-60px yapabilirsiniz
     )
 
     short_len_opts = [5, 8, 10, 13, 15, 20, 25, 30]
@@ -1027,12 +1028,12 @@ def launch(
 
     final_idx = W.BoundedIntText(value=1, min=1, max=1_000_000, step=1,
                                  description="Index of final residue:", layout=wide, style=DESC)
-    final_chain_rb = W.RadioButtons(
+    final_chain_rb = W.ToggleButtons(
         options=[],
         value=None,
-        description="Final chain:",
+        description="",
         layout=W.Layout(width="auto"),
-        style=DESC
+        style={"button_width": "42px"}
     )
 
     num_paths_opts_mode3 = [1000, 2000, 3000, 5000, 10000]
@@ -1052,18 +1053,16 @@ def launch(
     )
 
     functional_box = W.VBox([row_big])
-    init_chain_row = W.HBox([init_chain_rb], layout=W.Layout(flex_flow="row wrap", gap="16px"))
-    final_chain_row = W.HBox([final_chain_rb], layout=W.Layout(flex_flow="row wrap", gap="16px"))
+    init_chain_row  = W.Box([init_chain_rb], layout=W.Layout(display="flex", flex_flow="row wrap", gap="8px"))
+    final_chain_row = W.Box([final_chain_rb], layout=W.Layout(display="flex", flex_flow="row wrap", gap="8px"))
     
+        
+    # Mode2: index -> chain -> length -> number_paths
     mode2_box = W.VBox([init_idx, init_chain_row, row_short, row_np2])
     
-    # initial + final chain aynı satır
-    init_final_chain_row = W.HBox(
-        [init_chain_rb, final_chain_rb],
-        layout=W.Layout(flex_flow="row wrap", gap="28px", align_items="flex-start")
-    )
-    
-    mode3_box = W.VBox([init_idx, final_idx, init_final_chain_row, row_np3])
+    # Mode3: index init -> chain init -> index final -> chain final -> number_paths
+    mode3_box = W.VBox([init_idx, init_chain_row, final_idx, final_chain_row, row_np3])
+
 
     def _sync_mode(*_):
         functional_box.layout.display = ""
@@ -1130,8 +1129,9 @@ def launch(
         all_chains = [cb.description for cb in chain_checks_box.children]
         allowed = sel if sel else all_chains
     
-        init_chain_rb.options  = [(c, c) for c in allowed]
-        final_chain_rb.options = [(c, c) for c in allowed]
+        init_chain_rb.options  = list(allowed)
+        final_chain_rb.options = list(allowed)
+
     
         if allowed:
             if init_chain_rb.value not in allowed:
@@ -1151,10 +1151,23 @@ def launch(
         _sync_chain_id_and_init_final_options()
     
     chain_all_cb.observe(_on_all_chains_toggle, names="value")
+
     
+    def _ensure_at_least_one_chain_selected():
+        """If user unchecks everything while All chains is OFF, re-check the first chain."""
+        if chain_all_cb.value:
+            return
+        cbs = list(chain_checks_box.children)
+        if not cbs:
+            return
+        if not any(cb.value for cb in cbs):
+            cbs[0].value = True
+
+
     def _on_any_chain_checkbox(change):
         if change.get("name") != "value":
             return
+        _ensure_at_least_one_chain_selected() 
         if chain_checks_box.children:
             all_selected = all(cb.value for cb in chain_checks_box.children)
             # keep All chains consistent, but avoid recursion loops
@@ -1177,17 +1190,18 @@ def launch(
                 print("Loaded PDB but no chain IDs detected (will run as 'all chains').")
             return
     
-        # Create chain checkboxes (default checked)
+        # Create chain checkboxes (default: ONLY first chain checked)
         cbs = []
-        for ch in chains:
-            cb = W.Checkbox(value=True, description=ch, indent=False, layout=W.Layout(width="90px"))
+        for i, ch in enumerate(chains):
+            cb = W.Checkbox(value=(i == 0), description=ch, indent=False, layout=W.Layout(width="90px"))
             cb.observe(_on_any_chain_checkbox, names="value")
             cbs.append(cb)
         chain_checks_box.children = tuple(cbs)
-    
-        # Default: All chains ON
-        chain_all_cb.value = True
+        
+        # Default: All chains OFF
+        chain_all_cb.value = False
         _sync_chain_id_and_init_final_options()
+
     
         btn_submit.disabled = False
     
