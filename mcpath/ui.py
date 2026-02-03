@@ -892,7 +892,16 @@ def launch(
         layout=W.Layout(width="200px")
     )
     
-    chain_checks_box = W.VBox([])  # Load sonrası chain checkboxları burada oluşacak
+    chain_checks_box = W.HBox(
+        [],
+        layout=W.Layout(
+            display="flex",
+            flex_flow="row wrap",
+            gap="10px",
+            align_items="center"
+        )
+    )
+
     
     chain_global_box = W.VBox(
         [W.HTML("<b>Chain ID selection:</b>"), chain_all_cb, chain_checks_box],
@@ -974,12 +983,11 @@ def launch(
     
 
 
-    chain_id = W.Text(
-        value=str(cfg.get("chain_id", "")),
-        description="Chain ID:",
-        placeholder="A or A,B (empty = all chains)",
-        layout=wide, style=DESC
+    selected_chains_info = W.HTML(
+        value="<b>Selected chains:</b> all",
+        layout=W.Layout(margin="0 0 6px 0")
     )
+
     email = W.Text(value=str(cfg.get("email", "")), description="Email (opt):", layout=wide, style=DESC)
 
     pred_type = W.RadioButtons(
@@ -1004,7 +1012,7 @@ def launch(
     init_chain_rb = W.RadioButtons(
         options=[],
         value=None,
-        description="Chain of initial residue:",
+        description="Initial chain:",
         layout=W.Layout(width="auto"),
         style=DESC
     )
@@ -1022,7 +1030,7 @@ def launch(
     final_chain_rb = W.RadioButtons(
         options=[],
         value=None,
-        description="Chain of final residue:",
+        description="Final chain:",
         layout=W.Layout(width="auto"),
         style=DESC
     )
@@ -1044,8 +1052,18 @@ def launch(
     )
 
     functional_box = W.VBox([row_big])
-    mode2_box = W.VBox([init_idx, init_chain_rb, row_short, row_np2])
-    mode3_box = W.VBox([init_idx, init_chain_rb, final_idx, final_chain_rb, row_np3])
+    init_chain_row = W.HBox([init_chain_rb], layout=W.Layout(flex_flow="row wrap", gap="16px"))
+    final_chain_row = W.HBox([final_chain_rb], layout=W.Layout(flex_flow="row wrap", gap="16px"))
+    
+    mode2_box = W.VBox([init_idx, init_chain_row, row_short, row_np2])
+    
+    # initial + final chain aynı satır
+    init_final_chain_row = W.HBox(
+        [init_chain_rb, final_chain_rb],
+        layout=W.Layout(flex_flow="row wrap", gap="28px", align_items="flex-start")
+    )
+    
+    mode3_box = W.VBox([init_idx, final_idx, init_final_chain_row, row_np3])
 
     def _sync_mode(*_):
         functional_box.layout.display = ""
@@ -1072,8 +1090,8 @@ def launch(
         functional_box,
         mode2_box,
         mode3_box,
-    
-        chain_id, email,    # chain_id backend’de kalsın
+        selected_chains_info,
+        email,
         view_out,
         W.HBox([btn_submit, btn_new_job]),
         W.HTML("<hr>"),
@@ -1100,15 +1118,20 @@ def launch(
         return sels if sels else []  # none => treat as all chains
     
     def _sync_chain_id_and_init_final_options():
-        # chain_id sync (backend uses this)
         sel = _get_selected_global_chains()
-        chain_id.value = ",".join(sel) if sel else ""
+        
+        # info text (read-only)
+        if sel:
+            selected_chains_info.value = "<b>Selected chains:</b> " + ", ".join(sel)
+        else:
+            selected_chains_info.value = "<b>Selected chains:</b> all"
+
     
         all_chains = [cb.description for cb in chain_checks_box.children]
         allowed = sel if sel else all_chains
     
-        init_chain_rb.options  = [(f"Chain {c}", c) for c in allowed]
-        final_chain_rb.options = [(f"Chain {c}", c) for c in allowed]
+        init_chain_rb.options  = [(c, c) for c in allowed]
+        final_chain_rb.options = [(c, c) for c in allowed]
     
         if allowed:
             if init_chain_rb.value not in allowed:
@@ -1497,7 +1520,8 @@ def launch(
                         "length_paths": int(get_short_len()),
                         "number_paths": int(get_num_paths_2()),
                         "index_initial": int(init_idx.value),
-                        "chain_initial": (init_chain.value or "").strip()
+                        "chain_initial": (init_chain_rb.value or "").strip()
+
                     })
                 else:
                     data.update({
