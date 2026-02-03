@@ -19,6 +19,44 @@ def _enable_colab_widgets():
         pass
 
 # -------------------- validators & helpers --------------------
+
+def _get_upload_bytes_and_name(pdb_upload: W.FileUpload):
+    """
+    Works with both:
+      - ipywidgets<=7  : pdb_upload.value is dict {filename: {"content":..., "metadata": {...}}}
+      - ipywidgets>=8  : pdb_upload.value is tuple/list of dicts or UploadedFile objects
+    Returns (bytes, filename) or (None, None)
+    """
+    v = getattr(pdb_upload, "value", None)
+    if not v:
+        return None, None
+
+    # ipywidgets 7 style: dict
+    if isinstance(v, dict):
+        fname, meta = next(iter(v.items()))
+        content = meta.get("content", None)
+        name = (meta.get("metadata", {}) or {}).get("name", None) or fname
+        return content, name
+
+    # ipywidgets 8 style: list/tuple
+    if isinstance(v, (list, tuple)) and len(v) > 0:
+        item = v[0]
+
+        # Sometimes it's a dict
+        if isinstance(item, dict):
+            content = item.get("content", None)
+            name = item.get("name", None) or item.get("metadata", {}).get("name", None) or "upload.pdb"
+            return content, name
+
+        # Sometimes it's an UploadedFile-like object
+        content = getattr(item, "content", None)
+        name = getattr(item, "name", None) or "upload.pdb"
+        return content, name
+
+    return None, None
+
+
+
 def _is_valid_pdb_code(c):
     return bool(re.fullmatch(r"[0-9A-Za-z]{4}", (c or "").strip()))
 
@@ -818,14 +856,77 @@ def launch(
 
     pdb_code   = W.Text(value=str(cfg.get("pdb_code", "")), description="PDB code:", layout=wide, style=DESC)
     or_lbl     = W.HTML("<b>&nbsp;&nbsp;or&nbsp;&nbsp;</b>")
-    pdb_upload = W.FileUpload(accept=".pdb", multiple=False, description="Choose file")
-    file_lbl   = W.Label("No file chosen")
+    # --- Upload state (shared) ---
+    _UPLOADED_PDB = {"content": None, "name": None}  # closure içinde kullanılacak
+    
+    file_lbl = W.Label("No file chosen")
+    
+    # Colab varsa, gerçek upload butonu kullanalım
+    def _is_colab():
+        try:
+            import google.colab  # noqa
+            return True
+        except Exception:
+            return False
+    
+    if _is_colab():
+        btn_upload = W.Button(description="Upload PDB", icon="upload", button_style="")
+        pdb_upload = None  # colab mode: ipywidgets FileUpload kullanmıyoruz
+    
+        def _on_click_upload(_):
+            file_lbl.value = "Uploading..."
+            try:
+                from google.colab import files
+                uploaded = files.upload()  # kullanıcı seçince upload eder
+                if not uploaded:
+                    file_lbl.value = "No file chosen"
+                    _UPLOADED_PDB["content"] = None
+                    _UPLOADED_PDB["name"] = None
+                    return
+    
+                # files.upload() => { "file.pdb": b"..." }
+                name, content = next(iter(uploaded.items()))
+                _UPLOADED_PDB["name"] = name
+                _UPLOADED_PDB["content"] = content
+                file_lbl.value = name
+            except Exception as e:
+                file_lbl.value = "Upload failed"
+                _UPLOADED_PDB["content"] = None
+                _UPLOADED_PDB["name"] = None
+                print("Upload error:", e)
+    
+        btn_upload.on_click(_on_click_upload)
+    
+    else:
+        # Notebook/Jupyter mode: FileUpload kalsın
+        pdb_upload = W.FileUpload(accept=".pdb", multiple=False, description="Choose file")
+        btn_upload = None
+    
+        def _on_upload_change(_):
+            # burada senin yazdığımız helper’ı kullanalım:
+            content, name = _get_upload_bytes_and_name(pdb_upload)
+    
+            # FileUpload olayı upload bitince tetiklenir; yine de UX için:
+            if content is None:
+                file_lbl.value = "No file chosen"
+                _UPLOADED_PDB["content"] = None
+                _UPLOADED_PDB["name"] = None
+                return
+    
+            if isinstance(content, memoryview):
+                content = content.tobytes()
+    
+            _UPLOADED_PDB["content"] = content
+            _UPLOADED_PDB["name"] = name or "upload.pdb"
+            file_lbl.value = _UPLOADED_PDB["name"]
+    
+        pdb_upload.observe(_on_upload_change, names="value")
+    
 
     def _on_upload_change(_):
-        if pdb_upload.value:
-            file_lbl.value = next(iter(pdb_upload.value.keys()))
-        else:
-            file_lbl.value = "No file chosen"
+        content, name = _get_upload_bytes_and_name(pdb_upload)
+        file_lbl.value = name if (content is not None) else "No file chosen"
+
     pdb_upload.observe(_on_upload_change, names="value")
 
     chain_id = W.Text(
@@ -880,8 +981,11 @@ def launch(
         _LOG_OUT = W.Output()
     out = _LOG_OUT
 
-    pdb_row = W.HBox([pdb_code, W.HTML("&nbsp;"), or_lbl, pdb_upload, file_lbl],
-                     layout=W.Layout(align_items="center", justify_content="flex-start", flex_flow="row wrap", gap="10px"))
+    upload_widget = btn_upload if btn_upload is not None else pdb_upload
+    pdb_row = W.HBox(
+        [pdb_code, W.HTML("&nbsp;"), or_lbl, upload_widget, file_lbl],
+        layout=W.Layout(align_items="center", justify_content="flex-start", flex_flow="row wrap", gap="10px")
+    )
     functional_box = W.VBox([row_big])
     mode2_box = W.VBox([init_idx, init_chain, row_short, row_np2])
     mode3_box = W.VBox([init_idx, init_chain, final_idx, final_chain, row_np3])
@@ -936,13 +1040,22 @@ def launch(
         launch(defaults_url=defaults_url, show_title=show_title)
 
     def _collect_pdb_bytes():
-        if pdb_upload.value:
-            (_, meta) = next(iter(pdb_upload.value.items()))
-            return meta["content"], meta.get("metadata", {}).get("name", "upload.pdb")
+        # Önce: eğer upload yapılmışsa onu kullan
+        if _UPLOADED_PDB.get("content") is not None:
+            return _UPLOADED_PDB["content"], (_UPLOADED_PDB.get("name") or "upload.pdb")
+    
+        # Yoksa: PDB code ile indir
         code = pdb_code.value.strip()
         if not _is_valid_pdb_code(code):
             raise ValueError("PDB code must be exactly 4 alphanumeric characters (or upload a file).")
         return _fetch_rcsb(code), f"{code.upper()}.pdb"
+
+    
+        code = pdb_code.value.strip()
+        if not _is_valid_pdb_code(code):
+            raise ValueError("PDB code must be exactly 4 alphanumeric characters (or upload a file).")
+        return _fetch_rcsb(code), f"{code.upper()}.pdb"
+
 
     def _try_import_readpdb():
         try:
